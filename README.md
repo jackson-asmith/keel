@@ -1,0 +1,180 @@
+# keel
+
+PowerShell modules for unattended automation: Graph-first email delivery and bounded retries for HTTP requests.
+
+| Module | Purpose |
+|---|---|
+| [`keel.Mail`](Modules/keel.Mail) | Sends email through Microsoft Graph by default, with explicit SMTP delivery or automatic SMTP fallback when needed. |
+| [`keel.Http`](Modules/keel.Http) | Vendor-neutral retry helpers for REST calls. Exponential backoff with jitter, `Retry-After` support, and status-code detection across PowerShell versions. |
+
+`keel.Mail` depends on `keel.Http`. You can use `keel.Http` on its own for Graph, Atlassian, ServiceNow, or any API that uses standard HTTP throttling codes.
+
+## Requirements
+
+- Windows PowerShell 5.1 or PowerShell 7+
+- For Graph delivery, one of:
+  - An OAuth access token for Microsoft Graph, or
+  - The [Microsoft Graph PowerShell SDK](https://learn.microsoft.com/powershell/microsoftgraph/installation) (`Microsoft.Graph.Authentication`) with an existing session or app-only credentials
+- For Graph delivery, the app registration needs the `Mail.Send` application permission. Consider scoping it with an [Exchange Online application access policy](https://learn.microsoft.com/graph/auth-limit-mailbox-access) or RBAC for Applications so it can only send as the mailboxes you intend.
+- For SMTP delivery, a reachable SMTP server or relay
+
+## Installation
+
+Clone the repository and put the `Modules` folder on your module path:
+
+```powershell
+git clone https://github.com/jackson-asmith/keel.git
+$env:PSModulePath = "$PWD/keel/Modules" + [System.IO.Path]::PathSeparator + $env:PSModulePath
+
+Import-Module keel.Mail   # also loads keel.Http
+```
+
+To make this permanent, copy `Modules/keel.Http` and `Modules/keel.Mail` into one of the folders listed in `$env:PSModulePath`.
+
+## keel.Mail
+
+The module exports one command, `Send-Email`.
+
+### Send through Graph (default)
+
+```powershell
+$mail = @{
+    Subject = 'Nightly sync failed'
+    To      = 'ops@contoso.com'
+    From    = 'automation@contoso.com'
+    Body    = '<p>See the attached log for details.</p>'
+}
+Send-Email @mail -BodyAsHtml -AttachmentPath 'C:\Logs\sync.log', 'C:\Logs\summary.csv'
+```
+
+`From` is also used as the Graph sender mailbox unless you pass `-GraphSenderUserId`. Graph messages are not saved to the sender's Sent Items.
+
+`-AttachmentPath` accepts one or more files. For Graph delivery, their combined size must be 3 MB or less, which is the most Graph accepts inline in a single send. Larger sends fail before any request is made, or fall back to SMTP when `-AllowSmtpFallback` is set. SMTP delivery has no module-side size limit, but your mail server may enforce one.
+
+Graph authentication is resolved in this order:
+
+1. `-GraphAccessToken` (or `KEEL_GRAPH_ACCESS_TOKEN`): calls the Graph REST API directly.
+2. An existing Microsoft Graph SDK session (`Connect-MgGraph`).
+3. App-only sign-in through the SDK, using the `KEEL_GRAPH_*` environment variables below. Certificate auth is preferred when a thumbprint is set. Set `KEEL_GRAPH_AUTH_MODE` to `Certificate` or `ClientSecret` to force one mode.
+
+### Send through SMTP
+
+```powershell
+$mail = @{
+    DeliveryMethod = 'Smtp'
+    SmtpServer     = 'smtp.contoso.com'
+    Subject        = 'Nightly sync failed'
+    To             = 'ops@contoso.com'
+    From           = 'automation@contoso.com'
+    Body           = 'See the log for details.'
+}
+Send-Email @mail
+```
+
+### Graph with SMTP fallback
+
+```powershell
+$mail = @{
+    SmtpServer = 'smtp.contoso.com'
+    Subject    = 'Nightly sync failed'
+    To         = 'ops@contoso.com'
+    Cc         = 'management@contoso.com'
+    From       = 'automation@contoso.com'
+    Body       = 'See the log for details.'
+}
+Send-Email @mail -AllowSmtpFallback
+```
+
+If Graph delivery fails, a warning with the Graph error is written and the message is sent through SMTP instead.
+
+### Recipients
+
+`To`, `Cc`, `Bcc`, and `ReplyTo` are trimmed, and duplicates are removed without regard to case, before sending. `Send-Email` supports `-WhatIf` and `-Confirm`.
+
+### Environment variables
+
+Scheduled tasks and other unattended jobs can be configured without changing the calling script. Explicit parameters always take precedence over these variables. For why the module relies on this much environment configuration, see [ADR 0001](docs/adr/0001-environment-variable-configuration.md).
+
+| Variable | Used for |
+|---|---|
+| `KEEL_MAIL_DELIVERY_METHOD` | Default delivery method, `Graph` or `Smtp` |
+| `KEEL_MAIL_ALLOW_SMTP_FALLBACK` | Enables SMTP fallback. Accepts `true`/`false`, `yes`/`no`, `1`/`0`, and `on`/`off` |
+| `KEEL_MAIL_CC` | Default Cc recipients, separated by commas or semicolons |
+| `KEEL_MAIL_REPLY_TO` | Default Reply-To addresses, separated by commas or semicolons |
+| `KEEL_SMTP_SERVER` | SMTP server |
+| `KEEL_SMTP_RELAY` | SMTP relay, used when `KEEL_SMTP_SERVER` is not set |
+| `KEEL_GRAPH_SENDER_USER_ID` | Graph sender mailbox |
+| `KEEL_GRAPH_ACCESS_TOKEN` | Graph access token for direct REST calls |
+| `KEEL_GRAPH_TENANT_ID` | Tenant ID for app-only SDK sign-in |
+| `KEEL_GRAPH_CLIENT_ID` | Application (client) ID for app-only SDK sign-in |
+| `KEEL_GRAPH_CERTIFICATE_THUMBPRINT` | Certificate thumbprint for certificate auth |
+| `KEEL_GRAPH_CLIENT_SECRET` | Client secret for client-secret auth |
+| `KEEL_GRAPH_AUTH_MODE` | Forces `Certificate` or `ClientSecret` auth. When unset, the mode is chosen automatically |
+
+An unrecognized value in `KEEL_MAIL_DELIVERY_METHOD`, `KEEL_MAIL_ALLOW_SMTP_FALLBACK`, or `KEEL_GRAPH_AUTH_MODE` is ignored with a warning that names the variable and the default used instead. `KEEL_MAIL_CC` or `KEEL_MAIL_REPLY_TO` set to only delimiters is an error.
+
+Prefer certificate auth for unattended jobs. If you use a client secret, keep it out of source control and scripts. Load it from a secret store such as `Microsoft.PowerShell.SecretManagement` or your scheduler's protected variables.
+
+## keel.Http
+
+### Invoke-WithBoundedRetry
+
+Runs a scriptblock and retries it on transient HTTP failures. Output from the successful attempt is returned. Non-retryable errors are rethrown immediately, and the last error is rethrown once attempts run out.
+
+```powershell
+$issues = Invoke-WithBoundedRetry -ScriptBlock {
+    Invoke-RestMethod -Uri $uri -Headers $headers
+} -MaxAttempts 5 -BaseDelayMilliseconds 1000
+```
+
+| Parameter | Default | Description |
+|---|---|---|
+| `ScriptBlock` | (required) | The operation to run |
+| `MaxAttempts` | `3` | Total attempts, including the first. Must be at least 1 |
+| `BaseDelayMilliseconds` | `500` | First backoff delay, 0 or greater. Doubles on each retry, plus 0-250 ms of jitter, capped at 5 seconds |
+| `MaxRetryAfterSeconds` | `60` | Longest `Retry-After` wait the function will honor |
+
+**Retried status codes:** 408, 429, 500, 502, 503, 504.
+
+**Retry-After:** when a retryable response includes a `Retry-After` header, in either delta-seconds or HTTP-date form, the function waits that long (plus jitter) instead of using the backoff delay. The 5-second cap does not apply. If the server asks for a longer wait than `MaxRetryAfterSeconds`, the error is rethrown right away rather than retrying before the server is ready.
+
+HTTP defines `Retry-After` for 429 and 503, but gateways and some APIs, including Microsoft Graph, also send it with other transient errors. For that reason it is honored on any retryable status. Non-retryable responses fail immediately even if they include the header.
+
+### Get-RetryableStatusCode
+
+Returns the HTTP status code from an error record, or nothing if it can't be determined. Use it for your own retry decisions:
+
+```powershell
+try {
+    Invoke-RestMethod @request
+}
+catch {
+    $statusCode = $_ | Get-RetryableStatusCode
+    if ($statusCode -eq 404) {
+        # Handle a missing resource
+    }
+}
+```
+
+The status is read, in order, from:
+
+1. The exception's `Response.StatusCode`, as set by `Invoke-RestMethod`, `Invoke-WebRequest`, and `Invoke-MgGraphRequest`
+2. The exception's own `StatusCode` (`HttpRequestException` in .NET 5+)
+3. Known status-code phrasings in the error message, such as `Response status code does not indicate success: 503`, `The remote server returned an error: (429)`, `HTTP 502`, or `StatusCode: 504`. Named statuses like `TooManyRequests` are also recognized.
+
+Numbers that aren't presented as a status code are ignored, so a message like `Quota of 500 items exceeded` isn't treated as an HTTP 500.
+
+## Running the tests
+
+The tests use [Pester 6](https://pester.dev):
+
+```powershell
+Install-PSResource Pester -Version 6.2.0   # or: Install-Module Pester -MinimumVersion 6.0.0
+Invoke-Pester ./Modules -Output Detailed
+```
+
+Each module keeps its tests in its own `Tests` folder. All network calls, SMTP sends, and sleeps are mocked, so the tests need no Graph tenant, SMTP server, or network access. If the Microsoft Graph SDK isn't installed, the tests stub the commands they need.
+
+## License
+
+[MIT](LICENSE) © 2026 jackson-asmith

@@ -1,0 +1,29 @@
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor and IDE settings
+.vscode/
+.idea/
+*.code-workspace
+
+# Pester output
+testResults.xml
+TestResults/
+coverage.xml
+Coverage/
+
+# Build and packaging output
+out/
+output/
+*.nupkg
+
+# Local configuration and secrets
+.env
+.env.*
+*.pfx
+*.pem
+*.key
+*.secret.ps1
+local.settings.ps1
