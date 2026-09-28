@@ -400,6 +400,79 @@ Describe 'keel.Mail' {
         }
     }
 
+    Describe 'Test-GraphSendRefused' {
+        BeforeAll {
+            function New-FailureRecord {
+                param([System.Exception]$Exception)
+                [System.Management.Automation.ErrorRecord]::new($Exception, 'SendFailed', 'InvalidOperation', $null)
+            }
+
+            function Test-Refused {
+                param([System.Management.Automation.ErrorRecord]$Record)
+                InModuleScope keel.Mail -Parameters @{ R = $Record } {
+                    param($R)
+                    Test-GraphSendRefused -ErrorRecord $R
+                }
+            }
+        }
+
+        It 'reports status <StatusCode> as refused, so resending cannot duplicate' -ForEach @(
+            @{ StatusCode = 400 }, @{ StatusCode = 401 }, @{ StatusCode = 403 }, @{ StatusCode = 404 },
+            @{ StatusCode = 408 }, @{ StatusCode = 413 }, @{ StatusCode = 429 }, @{ StatusCode = 503 }
+        ) {
+            $record = New-FailureRecord ([System.Exception]::new("Response status code does not indicate success: $StatusCode (x)."))
+            Test-Refused $record | Should-BeTrue
+        }
+
+        It 'reports status <StatusCode> as possibly delivered' -ForEach @(
+            @{ StatusCode = 500 }, @{ StatusCode = 502 }, @{ StatusCode = 504 }
+        ) {
+            $record = New-FailureRecord ([System.Exception]::new("Response status code does not indicate success: $StatusCode (x)."))
+            Test-Refused $record | Should-BeFalse
+        }
+
+        It 'reports a failure with no status or connection detail as possibly delivered' {
+            $record = New-FailureRecord ([System.Exception]::new('The operation has timed out.'))
+            Test-Refused $record | Should-BeFalse
+        }
+
+        It 'reports a <SocketError> socket failure as refused' -ForEach @(
+            @{ SocketError = 'HostNotFound' }, @{ SocketError = 'ConnectionRefused' }, @{ SocketError = 'NetworkUnreachable' }
+        ) {
+            $socket = [System.Net.Sockets.SocketException]::new([int][System.Net.Sockets.SocketError]$SocketError)
+            $record = New-FailureRecord ([System.Exception]::new('Connection failed.', $socket))
+            Test-Refused $record | Should-BeTrue
+        }
+
+        It 'reports a connection reset mid-request as possibly delivered' {
+            $socket = [System.Net.Sockets.SocketException]::new([int][System.Net.Sockets.SocketError]::ConnectionReset)
+            $record = New-FailureRecord ([System.Exception]::new('Connection reset.', $socket))
+            Test-Refused $record | Should-BeFalse
+        }
+
+        It 'reports a Windows PowerShell <Status> WebException as refused' -ForEach @(
+            @{ Status = 'NameResolutionFailure' }, @{ Status = 'ConnectFailure' }, @{ Status = 'SecureChannelFailure' }
+        ) {
+            $exception = [System.Net.WebException]::new('Request failed.', [System.Net.WebExceptionStatus]$Status)
+            Test-Refused (New-FailureRecord $exception) | Should-BeTrue
+        }
+
+        It 'reports a Windows PowerShell timeout WebException as possibly delivered' {
+            $exception = [System.Net.WebException]::new('Timed out.', [System.Net.WebExceptionStatus]::Timeout)
+            Test-Refused (New-FailureRecord $exception) | Should-BeFalse
+        }
+
+        It 'reads HttpRequestError on PowerShell 7.4 and later' -Skip:(-not ('System.Net.Http.HttpRequestError' -as [type])) {
+            $refused = [System.Net.Http.HttpRequestException]::new(
+                [System.Net.Http.HttpRequestError]::NameResolutionError, 'No such host.', $null, $null)
+            $ended = [System.Net.Http.HttpRequestException]::new(
+                [System.Net.Http.HttpRequestError]::ResponseEnded, 'Response ended.', $null, $null)
+
+            Test-Refused (New-FailureRecord $refused) | Should-BeTrue
+            Test-Refused (New-FailureRecord $ended) | Should-BeFalse
+        }
+    }
+
     Describe 'Send-GraphEmail' {
         BeforeAll {
             function Get-LastPayload {
@@ -586,6 +659,66 @@ Describe 'keel.Mail' {
                 }
 
                 $script:GraphAttempts | Should-Be 2
+            }
+
+            It 'retries a 429 from Graph' {
+                $script:GraphAttempts = 0
+                Mock Invoke-RestMethod -ModuleName keel.Mail {
+                    $script:GraphAttempts++
+                    if ($script:GraphAttempts -eq 1) {
+                        throw 'Response status code does not indicate success: 429 (Too Many Requests).'
+                    }
+                }
+
+                InModuleScope keel.Mail {
+                    Send-GraphEmail -SendUserId 's@contoso.com' -Subject 'Hi' -To 'a@contoso.com' -Body 'B' -GraphAccessToken 't'
+                }
+
+                $script:GraphAttempts | Should-Be 2
+            }
+
+            It 'sends exactly once and reports unknown delivery after a <StatusCode>' -ForEach @(
+                @{ StatusCode = 500 }, @{ StatusCode = 502 }, @{ StatusCode = 504 }
+            ) {
+                $script:GraphAttempts = 0
+                Mock Invoke-RestMethod -ModuleName keel.Mail {
+                    $script:GraphAttempts++
+                    throw "Response status code does not indicate success: $StatusCode (x)."
+                }
+
+                $thrown = $null
+                try {
+                    InModuleScope keel.Mail {
+                        Send-GraphEmail -SendUserId 's@contoso.com' -Subject 'Hi' -To 'a@contoso.com' -Body 'B' -GraphAccessToken 't'
+                    }
+                }
+                catch {
+                    $thrown = $_
+                }
+
+                $script:GraphAttempts | Should-Be 1
+                $thrown.FullyQualifiedErrorId | Should-BeLikeString 'GraphDeliveryUnknown*'
+                $thrown.Exception.Data['KeelDeliveryState'] | Should-Be 'Unknown'
+                $thrown.Exception.Message | Should-BeLikeString "*may have been delivered*$StatusCode*"
+            }
+
+            It 'rethrows a refused request unchanged' {
+                Mock Invoke-RestMethod -ModuleName keel.Mail {
+                    throw 'Response status code does not indicate success: 403 (Forbidden).'
+                }
+
+                $thrown = $null
+                try {
+                    InModuleScope keel.Mail {
+                        Send-GraphEmail -SendUserId 's@contoso.com' -Subject 'Hi' -To 'a@contoso.com' -Body 'B' -GraphAccessToken 't'
+                    }
+                }
+                catch {
+                    $thrown = $_
+                }
+
+                $thrown.Exception.Message | Should-BeLikeString '*403*'
+                $thrown.Exception.Data['KeelDeliveryState'] | Should-BeNull
             }
 
             It 'does not use the Graph SDK when a token is supplied' {
@@ -873,6 +1006,24 @@ Describe 'keel.Mail' {
 
                 Should-Invoke Send-SmtpEmail -ModuleName keel.Mail -Times 1 -Exactly -ParameterFilter { $SmtpServer -eq 'smtp.contoso.com' }
                 Should-Invoke Write-Warning -ModuleName keel.Mail -Times 1 -Exactly -ParameterFilter { $Message -like '*graph down*' }
+            }
+
+            It 'does not fall back to SMTP when Graph may already have delivered the message' {
+                Mock Send-GraphEmail -ModuleName keel.Mail {
+                    $exception = [System.InvalidOperationException]::new('Graph did not confirm whether the message was sent.')
+                    $exception.Data['KeelDeliveryState'] = 'Unknown'
+                    throw [System.Management.Automation.ErrorRecord]::new($exception, 'GraphDeliveryUnknown', 'OperationTimeout', $null)
+                }
+
+                {
+                    InModuleScope keel.Mail -Parameters @{ A = $DeliveryArgs } {
+                        param($A)
+                        Invoke-Delivery -DeliveryMethod Graph -SmtpServer 'smtp.contoso.com' -AllowSmtpFallback @A
+                    }
+                } | Should-Throw -ExceptionMessage 'Graph did not confirm*'
+
+                Should-NotInvoke Send-SmtpEmail -ModuleName keel.Mail
+                Should-Invoke Write-Warning -ModuleName keel.Mail -Times 1 -Exactly -ParameterFilter { $Message -like '*Not falling back to SMTP*' }
             }
 
             It 'throws with the Graph error when fallback is enabled but no SMTP server is set' {
@@ -1196,6 +1347,19 @@ Describe 'keel.Mail' {
 
                 Should-Invoke Invoke-RestMethod -ModuleName keel.Mail -Times 1 -Exactly
                 Should-Invoke Send-MailMessage -ModuleName keel.Mail -Times 1 -Exactly
+            }
+
+            It 'sends a message once, and not through SMTP, when Graph returns a gateway timeout' {
+                Mock Invoke-RestMethod -ModuleName keel.Mail {
+                    $script:RestCalls.Add(@{ Uri = [string]$Uri; Body = $Body })
+                    throw 'Response status code does not indicate success: 504 (Gateway Timeout).'
+                }
+
+                { Send-Email @BaseMail -GraphAccessToken 'tok' -SmtpServer 'smtp.contoso.com' -AllowSmtpFallback } |
+                    Should-Throw -ExceptionMessage '*may have been delivered*'
+
+                $script:RestCalls.Count | Should-Be 1
+                Should-NotInvoke Send-MailMessage -ModuleName keel.Mail
             }
 
             It 'does not fall back to SMTP when fallback is not enabled, even if an SMTP server is configured' {

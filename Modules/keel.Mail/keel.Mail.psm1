@@ -21,6 +21,26 @@ in the manifest.
 # Larger files need a Graph upload session, which this module does not implement.
 $script:GraphInlineAttachmentLimitBytes = 3MB
 
+# sendMail is not idempotent: repeating a request Graph already accepted sends the
+# message again. Only retry statuses where Graph refused the request outright.
+# A 500, 502, or 504 can arrive after the message was accepted, so those are
+# never retried and never trigger SMTP fallback.
+$script:GraphSendRetryableStatusCodes = @(429, 503)
+
+# Failures raised before a connection exists, so the request never reached Graph.
+# HttpRequestError is PowerShell 7.4+ (.NET 8), WebExceptionStatus is Windows
+# PowerShell 5.1, and SocketError covers the socket layer underneath either one.
+$script:NotSentHttpRequestErrors = @(
+    'NameResolutionError', 'ConnectionError', 'SecureConnectionError', 'ProxyTunnelError'
+)
+$script:NotSentWebExceptionStatuses = @(
+    'NameResolutionFailure', 'ProxyNameResolutionFailure', 'ConnectFailure',
+    'SecureChannelFailure', 'TrustFailure'
+)
+$script:NotSentSocketErrors = @(
+    'HostNotFound', 'NoData', 'TryAgain', 'ConnectionRefused', 'NetworkUnreachable', 'HostUnreachable'
+)
+
 
 function Convert-ToGraphRecipient {
     <#
@@ -343,6 +363,56 @@ function New-GraphFileAttachment {
     }
 }
 
+function Test-GraphSendRefused {
+    <#
+    .SYNOPSIS
+    Reports whether a failed sendMail request was definitely not accepted by Graph.
+
+    .DESCRIPTION
+    Returns $true only when the failure proves Graph did not accept the message,
+    so resending it, through Graph or SMTP, cannot create a duplicate:
+
+    - A 4xx status: Graph rejected the request.
+    - A 503 status: Graph was unavailable and did not process the request.
+    - A connection failure with no response: name resolution, connection,
+      TLS, or proxy tunnel errors raised before the request was sent.
+
+    Returns $false for anything else, including 500, 502, and 504 responses,
+    timeouts, and connections dropped mid-request. In those cases Graph may
+    have accepted the message before the failure.
+
+    .PARAMETER ErrorRecord
+    The error record from the failed sendMail request.
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory)]
+        [System.Management.Automation.ErrorRecord]$ErrorRecord
+    )
+
+    $statusCode = Get-RetryableStatusCode -ErrorRecord $ErrorRecord
+    if ($null -ne $statusCode) {
+        return (($statusCode -ge 400 -and $statusCode -le 499) -or $statusCode -eq 503)
+    }
+
+    $exception = $ErrorRecord.Exception
+    while ($null -ne $exception) {
+        $properties = $exception.PSObject.Properties
+        if (
+            ($properties['HttpRequestError'] -and "$($exception.HttpRequestError)" -in $script:NotSentHttpRequestErrors) -or
+            ($exception -is [System.Net.WebException] -and "$($exception.Status)" -in $script:NotSentWebExceptionStatuses) -or
+            ($exception -is [System.Net.Sockets.SocketException] -and "$($exception.SocketErrorCode)" -in $script:NotSentSocketErrors)
+        ) {
+            return $true
+        }
+
+        $exception = $exception.InnerException
+    }
+
+    $false
+}
+
 function Send-GraphEmail {
     <#
     .SYNOPSIS
@@ -351,6 +421,13 @@ function Send-GraphEmail {
     .DESCRIPTION
     Delivers an email message using Microsoft Graph API, supporting both
     direct token-based authentication and SDK-based authentication.
+
+    The request is retried only on 429 and 503, where Graph refused it. If the
+    request fails in a way that leaves it unclear whether Graph accepted the
+    message (for example a 500, 502, or 504, or a timeout), the function throws
+    an error with the ErrorId 'GraphDeliveryUnknown' and sets
+    Exception.Data['KeelDeliveryState'] to 'Unknown'. Callers must not resend
+    the message after that error without checking whether it was delivered.
 
     .PARAMETER SendUserId
     The Graph user ID of the sender.
@@ -469,20 +546,18 @@ function Send-GraphEmail {
         saveToSentItems = $false
     }
 
+    $encodedUserId = [System.Uri]::EscapeDataString($SendUserId)
+    $requestBody = $payload | ConvertTo-Json -Depth 10
+
     if (-not [string]::IsNullOrWhiteSpace($GraphAccessToken)) {
-        $encodedUserId = [System.Uri]::EscapeDataString($SendUserId)
-        $headers = @{ Authorization = "Bearer $GraphAccessToken" }
         $restParams = @{
             Method      = 'Post'
             Uri         = "https://graph.microsoft.com/v1.0/users/$encodedUserId/sendMail"
-            Headers     = $headers
-            Body        = ($payload | ConvertTo-Json -Depth 10)
+            Headers     = @{ Authorization = "Bearer $GraphAccessToken" }
+            Body        = $requestBody
             ContentType = 'application/json'
         }
-
-        Invoke-WithBoundedRetry -ScriptBlock {
-            Invoke-RestMethod @restParams
-        }
+        $sendRequest = { Invoke-RestMethod @restParams }
     }
 
     elseif (Get-Command Invoke-MgGraphRequest -ErrorAction SilentlyContinue) {
@@ -490,23 +565,43 @@ function Send-GraphEmail {
             Connect-AutomationGraph
         }
 
-        $encodedUserId = [System.Uri]::EscapeDataString($SendUserId)
         $graphRequestParams = @{
             Method      = 'POST'
             Uri         = "/v1.0/users/$encodedUserId/sendMail"
-            Body        = ($payload | ConvertTo-Json -Depth 10)
+            Body        = $requestBody
             ContentType = 'application/json'
         }
-
-        Invoke-WithBoundedRetry -ScriptBlock {
-            Invoke-MgGraphRequest @graphRequestParams
-        }
+        $sendRequest = { Invoke-MgGraphRequest @graphRequestParams }
     }
 
     else {
         throw (
             'No Graph auth method available. Provide -GraphAccessToken or install/connect ' +
             'the Microsoft Graph PowerShell SDK.'
+        )
+    }
+
+    # Everything above fails before a request is sent. From here on, a failure
+    # may come after Graph accepted the message.
+    try {
+        Invoke-WithBoundedRetry -ScriptBlock $sendRequest -RetryableStatusCode $script:GraphSendRetryableStatusCodes
+    }
+    catch {
+        if (Test-GraphSendRefused -ErrorRecord $_) {
+            throw
+        }
+
+        $unknownDelivery = [System.InvalidOperationException]::new(
+            "Graph did not confirm whether the message was sent, so it may have been delivered. " +
+            "Check the sender's message trace before resending. Graph error: $($_.Exception.Message)",
+            $_.Exception
+        )
+        $unknownDelivery.Data['KeelDeliveryState'] = 'Unknown'
+        throw [System.Management.Automation.ErrorRecord]::new(
+            $unknownDelivery,
+            'GraphDeliveryUnknown',
+            [System.Management.Automation.ErrorCategory]::OperationTimeout,
+            $SendUserId
         )
     }
 }
@@ -667,7 +762,9 @@ function Invoke-Delivery {
     Optional OAuth access token for Graph authentication.
 
     .PARAMETER AllowSmtpFallback
-    Allows falling back to SMTP if Graph delivery fails.
+    Allows falling back to SMTP when Graph delivery fails in a way that proves
+    the message was not sent. When Graph may have accepted the message, the
+    error is rethrown instead, to avoid a duplicate.
 
     .EXAMPLE
     Invoke-Delivery -DeliveryMethod Graph -Subject 'Alert' -To 'admin@contoso.com' -From 'alerts@contoso.com' -Body 'Test message.' -AllowSmtpFallback
@@ -755,6 +852,14 @@ function Invoke-Delivery {
                 throw
             }
 
+            # Graph may already have delivered the message. Sending it again through
+            # SMTP could deliver a duplicate, so fallback is only for failures that
+            # prove Graph did not accept it.
+            if ($_.Exception.Data['KeelDeliveryState'] -eq 'Unknown') {
+                Write-Warning 'Graph delivery state is unknown. Not falling back to SMTP, to avoid sending a duplicate.'
+                throw
+            }
+
             if ([string]::IsNullOrWhiteSpace($SmtpServer)) {
                 $graphError = $_.Exception.Message
                 throw (
@@ -832,7 +937,11 @@ function Send-Email {
 
     .PARAMETER AllowSmtpFallback
     If specified, allows the function to fall back to SMTP when Graph delivery
-    fails.
+    fails and the failure proves Graph did not accept the message: a 4xx or 503
+    response, a connection failure before the request was sent, or a problem
+    found before sending, such as an oversized attachment. When Graph may have
+    accepted the message, such as after a 500, 502, or 504 or a timeout, no
+    fallback is attempted and the error is rethrown.
 
     .NOTES
     Supported environment variables:

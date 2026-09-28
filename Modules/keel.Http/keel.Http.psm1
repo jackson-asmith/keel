@@ -227,7 +227,20 @@ function Invoke-WithBoundedRetry {
 
     .DESCRIPTION
     Executes a scriptblock with automatic retry on transient HTTP failures.
-    Retries only on status codes 408, 429, 500, 502, 503, and 504.
+    By default it retries on status codes 408, 429, 500, 502, 503, and 504.
+    Use RetryableStatusCode to narrow that list for operations that are not
+    safe to repeat.
+
+    Output from each attempt is buffered and only returned once an attempt
+    succeeds, so a failed attempt that wrote partial output does not leave
+    duplicates in the pipeline. Output is therefore returned all at once at
+    the end rather than streamed.
+
+    Only retry operations that are safe to repeat. A 500, 502, or 504 can mean
+    the server completed the request but the response was lost, so retrying a
+    non-idempotent call such as a POST that sends a message or creates a record
+    can repeat it. For those calls, pass a narrower RetryableStatusCode list,
+    such as 429 and 503, where the server has refused the request.
 
     Between attempts the function waits using exponential backoff with jitter,
     capped at 5 seconds, to avoid thundering-herd retries.
@@ -255,6 +268,10 @@ function Invoke-WithBoundedRetry {
     The longest Retry-After wait, in seconds, the function will honor.
     Longer requested waits cause the error to be rethrown. Defaults to 60.
 
+    .PARAMETER RetryableStatusCode
+    The HTTP status codes to retry. Defaults to 408, 429, 500, 502, 503, and
+    504. Any other status, or an error with no status, is rethrown immediately.
+
     .EXAMPLE
     Invoke-WithBoundedRetry -ScriptBlock { Invoke-RestMethod @params } -MaxAttempts 5 -BaseDelayMilliseconds 1000
 
@@ -262,6 +279,12 @@ function Invoke-WithBoundedRetry {
     Invoke-WithBoundedRetry -ScriptBlock { Invoke-MgGraphRequest @request } -MaxRetryAfterSeconds 120
 
     Honors Graph throttling responses that ask the caller to wait up to two minutes.
+
+    .EXAMPLE
+    Invoke-WithBoundedRetry -ScriptBlock { Invoke-RestMethod -Method Post @params } -RetryableStatusCode 429, 503
+
+    Retries a non-idempotent POST only when the server refused it, never after
+    an ambiguous 500, 502, or 504.
     #>
     [CmdletBinding()]
     param(
@@ -275,18 +298,25 @@ function Invoke-WithBoundedRetry {
         [int]$BaseDelayMilliseconds = 500,
 
         [ValidateRange(0, 3600)]
-        [int]$MaxRetryAfterSeconds = 60
+        [int]$MaxRetryAfterSeconds = 60,
+
+        [ValidateNotNullOrEmpty()]
+        [ValidateRange(100, 599)]
+        [int[]]$RetryableStatusCode = $script:RetryableStatusCodes
     )
 
     for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
         try {
             Write-Debug "Invoke-WithBoundedRetry: Attempt $attempt of $MaxAttempts"
-            & $ScriptBlock
-            break
+            # Buffer this attempt's output. If the attempt fails partway, whatever it
+            # already produced is discarded instead of being emitted a second time
+            # when the next attempt succeeds. @() keeps a single output that is
+            # itself a collection intact when it is emitted below.
+            $attemptOutput = @(& $ScriptBlock)
         }
         catch {
             $statusCode = Get-RetryableStatusCode -ErrorRecord $_
-            $isRetryable = $statusCode -in $script:RetryableStatusCodes
+            $isRetryable = $null -ne $statusCode -and $statusCode -in $RetryableStatusCode
 
             if (-not $isRetryable -or $attempt -eq $MaxAttempts) {
                 Write-Debug "Invoke-WithBoundedRetry: Non-retryable error or max attempts reached (StatusCode: $statusCode)"
@@ -312,7 +342,11 @@ function Invoke-WithBoundedRetry {
             }
 
             Start-Sleep -Milliseconds ([int]$delayMilliseconds)
+            continue
         }
+
+        $attemptOutput
+        return
     }
 }
 

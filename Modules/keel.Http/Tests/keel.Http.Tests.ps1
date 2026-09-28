@@ -294,6 +294,106 @@ Describe 'Invoke-WithBoundedRetry' {
         }
     }
 
+    Context 'output from failed attempts' {
+        It 'returns only the output of the successful attempt' {
+            $result = Invoke-WithBoundedRetry -ScriptBlock {
+                $script:Attempts++
+                "page from attempt $script:Attempts"
+                if ($script:Attempts -lt 3) {
+                    throw (New-HttpErrorRecord -StatusCode 503)
+                }
+            }
+
+            $result | Should-Be 'page from attempt 3'
+            $script:Attempts | Should-Be 3
+        }
+
+        It 'emits nothing when every attempt fails partway through' {
+            $output = [System.Collections.Generic.List[object]]::new()
+            {
+                Invoke-WithBoundedRetry -ScriptBlock {
+                    'partial'
+                    throw (New-HttpErrorRecord -StatusCode 503)
+                } | ForEach-Object { $output.Add($_) }
+            } | Should-Throw
+
+            $output.Count | Should-Be 0
+        }
+
+        It 'returns nothing when the successful attempt produces no output' {
+            $result = @(Invoke-WithBoundedRetry -ScriptBlock { })
+            $result.Count | Should-Be 0
+        }
+
+        It 'keeps a single collection output as one object' {
+            $result = @(Invoke-WithBoundedRetry -ScriptBlock { , @(1, 2, 3) })
+
+            $result.Count | Should-Be 1
+            $result[0] | Should-BeCollection @(1, 2, 3)
+        }
+    }
+
+    Context 'custom retryable status codes' {
+        It 'defaults to 408, 429, 500, 502, 503, and 504' {
+            $default = (Get-Command Invoke-WithBoundedRetry).Parameters['RetryableStatusCode']
+            $default.ParameterType | Should-Be ([int[]])
+            InModuleScope keel.Http { $script:RetryableStatusCodes } | Should-BeCollection @(408, 429, 500, 502, 503, 504)
+        }
+
+        It 'does not retry status <StatusCode> when it is left out of the list' -ForEach @(
+            @{ StatusCode = 500 }
+            @{ StatusCode = 502 }
+            @{ StatusCode = 504 }
+        ) {
+            {
+                Invoke-WithBoundedRetry -RetryableStatusCode 429, 503 -ScriptBlock {
+                    $script:Attempts++
+                    throw (New-HttpErrorRecord -StatusCode $StatusCode)
+                }
+            } | Should-Throw
+
+            $script:Attempts | Should-Be 1
+            Should-NotInvoke Start-Sleep -ModuleName keel.Http
+        }
+
+        It 'retries status <StatusCode> when it is in the list' -ForEach @(
+            @{ StatusCode = 429 }
+            @{ StatusCode = 503 }
+        ) {
+            $result = Invoke-WithBoundedRetry -RetryableStatusCode 429, 503 -ScriptBlock {
+                $script:Attempts++
+                if ($script:Attempts -eq 1) {
+                    throw (New-HttpErrorRecord -StatusCode $StatusCode)
+                }
+                'sent'
+            }
+
+            $result | Should-Be 'sent'
+            $script:Attempts | Should-Be 2
+        }
+
+        It 'can retry a status outside the default list' {
+            $result = Invoke-WithBoundedRetry -RetryableStatusCode 409 -ScriptBlock {
+                $script:Attempts++
+                if ($script:Attempts -eq 1) {
+                    throw (New-HttpErrorRecord -StatusCode 409)
+                }
+                'resolved'
+            }
+
+            $result | Should-Be 'resolved'
+        }
+
+        It 'rejects <Case>' -ForEach @(
+            @{ Case = 'an empty list'; Codes = @() }
+            @{ Case = 'a code below 100'; Codes = @(99) }
+            @{ Case = 'a code above 599'; Codes = @(600) }
+        ) {
+            { Invoke-WithBoundedRetry -RetryableStatusCode $Codes -ScriptBlock { $script:Attempts++ } } | Should-Throw
+            $script:Attempts | Should-Be 0
+        }
+    }
+
     Context 'when the operation fails with a non-retryable error' {
         It 'rethrows immediately for status <StatusCode>' -ForEach @(
             @{ StatusCode = 400 }
