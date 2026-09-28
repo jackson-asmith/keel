@@ -85,7 +85,21 @@ $mail = @{
 Send-Email @mail -AllowSmtpFallback
 ```
 
-If Graph delivery fails, a warning with the Graph error is written and the message is sent through SMTP instead.
+If Graph refuses the message, a warning with the Graph error is written and the message is sent through SMTP instead.
+
+### Delivery safety
+
+`sendMail` is not safe to repeat: if Graph has already accepted a message, sending it again delivers a duplicate. So `Send-Email` only retries or falls back to SMTP when the failure proves Graph did not accept the message:
+
+| Graph failure | Retried through Graph | SMTP fallback |
+|---|---|---|
+| 429 or 503 | Yes | Yes, if retries run out |
+| Other 4xx (400, 401, 403, 404, 413, ...) | No | Yes |
+| Name resolution, connection, TLS, or proxy failure before the request was sent | No | Yes |
+| Problem found before sending, such as an attachment over 3 MB | No | Yes |
+| 500, 502, or 504, a timeout, or a connection dropped mid-request | No | **No** |
+
+In the last row Graph may already have delivered the message, so `Send-Email` stops with a `GraphDeliveryUnknown` error, and `$_.Exception.Data['KeelDeliveryState']` is `Unknown`. Check the sender's message trace before resending. See [ADR 0002](docs/adr/0002-no-resend-after-ambiguous-graph-failure.md) for the reasoning.
 
 ### Recipients
 
@@ -119,7 +133,9 @@ Prefer certificate auth for unattended jobs. If you use a client secret, keep it
 
 ### Invoke-WithBoundedRetry
 
-Runs a scriptblock and retries it on transient HTTP failures. Output from the successful attempt is returned. Non-retryable errors are rethrown immediately, and the last error is rethrown once attempts run out.
+Runs a scriptblock and retries it on transient HTTP failures. Non-retryable errors are rethrown immediately, and the last error is rethrown once attempts run out.
+
+Each attempt's output is buffered, and only the output of the successful attempt is returned. If an attempt writes some output and then fails, that output is discarded, so it never appears twice. The trade-off is that output arrives all at once when the call finishes instead of streaming.
 
 ```powershell
 $issues = Invoke-WithBoundedRetry -ScriptBlock {
@@ -133,8 +149,15 @@ $issues = Invoke-WithBoundedRetry -ScriptBlock {
 | `MaxAttempts` | `3` | Total attempts, including the first. Must be at least 1 |
 | `BaseDelayMilliseconds` | `500` | First backoff delay, 0 or greater. Doubles on each retry, plus 0-250 ms of jitter, capped at 5 seconds |
 | `MaxRetryAfterSeconds` | `60` | Longest `Retry-After` wait the function will honor |
+| `RetryableStatusCode` | `408, 429, 500, 502, 503, 504` | Status codes to retry. Any other status, or an error with no status, is rethrown immediately |
 
-**Retried status codes:** 408, 429, 500, 502, 503, 504.
+**Only retry operations that are safe to repeat.** A 500, 502, or 504 can arrive after the server finished the work, so retrying a POST that sends a message or creates a record can do it twice. For those calls, narrow the list to statuses where the server refused the request:
+
+```powershell
+Invoke-WithBoundedRetry -ScriptBlock {
+    Invoke-RestMethod -Method Post -Uri $uri -Headers $headers -Body $body
+} -RetryableStatusCode 429, 503
+```
 
 **Retry-After:** when a retryable response includes a `Retry-After` header, in either delta-seconds or HTTP-date form, the function waits that long (plus jitter) instead of using the backoff delay. The 5-second cap does not apply. If the server asks for a longer wait than `MaxRetryAfterSeconds`, the error is rethrown right away rather than retrying before the server is ready.
 
