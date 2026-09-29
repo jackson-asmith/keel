@@ -27,3 +27,6 @@ output/
 *.key
 *.secret.ps1
 local.settings.ps1
+
+# Tools saved by build.ps1
+.tools/

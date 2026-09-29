@@ -1,5 +1,7 @@
 # keel
 
+[![CI](https://github.com/jackson-asmith/keel/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/jackson-asmith/keel/actions/workflows/ci.yml)
+
 PowerShell modules for unattended automation: Graph-first email delivery and bounded retries for HTTP requests.
 
 | Module | Purpose |
@@ -191,20 +193,39 @@ Numbers that aren't presented as a status code are ignored, so a message like `Q
 
 ## Running the tests
 
-The tests use [Pester 6](https://pester.dev):
+`build.ps1` runs the same checks as CI. It saves pinned versions of Pester, PSScriptAnalyzer, and (for integration tests) the Graph SDK into a gitignored `.tools` folder, so nothing is installed into your profile.
 
 ```powershell
-Install-PSResource Pester -Version 6.2.0   # or: Install-Module Pester -MinimumVersion 6.0.0
-Invoke-Pester ./Modules -Output Detailed
+./build.ps1                        # Lint and unit tests
+./build.ps1 -Task Lint             # PSScriptAnalyzer and Test-ModuleManifest only
+./build.ps1 -Task Test             # Pester unit tests only
+./build.ps1 -Task Integration      # Graph SDK integration tests
 ```
 
-Each module keeps its tests in its own `Tests` folder. All network calls, SMTP sends, and sleeps are mocked, so the tests need no Graph tenant, SMTP server, or network access. If the Microsoft Graph SDK isn't installed, the tests stub the commands they need.
+Each module keeps its tests in its own `Tests` folder. All network calls, SMTP sends, and sleeps are mocked, so the unit tests need no Graph tenant, SMTP server, or network access. If the Microsoft Graph SDK isn't installed, the tests stub the commands they need.
 
-`keel.Mail.Sdk.Tests.ps1` is an integration test for the Graph SDK path. It runs the real `Microsoft.Graph.Authentication` module against a stub Graph endpoint on your machine, so it still needs no tenant and sends no mail. It needs the SDK installed and permission to listen on port 80 (macOS allows this; Linux and Windows usually need elevation), and skips itself otherwise. To run only these tests:
+`keel.Mail.Sdk.Tests.ps1` is an integration test for the Graph SDK path. It runs the real `Microsoft.Graph.Authentication` module against a stub Graph endpoint on your machine, so it still needs no tenant and sends no mail. It needs permission to listen on port 80, which macOS allows; Linux and Windows usually need elevation. Run on its own with `Invoke-Pester`, it skips itself when a prerequisite is missing. `./build.ps1 -Task Integration` fails instead, so a skip can't pass silently.
 
-```powershell
-Invoke-Pester ./Modules -TagFilter Integration -Output Detailed
-```
+### Linting
+
+PSScriptAnalyzer settings live at the repository root:
+
+- `PSScriptAnalyzerSettings.psd1` applies to module code and `build.ps1`. It includes compatibility rules that flag syntax, commands, and types that Windows PowerShell 5.1 doesn't have.
+- `PSScriptAnalyzerSettings.Tests.psd1` applies to tests. It turns off a few rules for patterns test code needs on purpose, such as stub parameters and fake credentials.
+
+Errors and warnings fail the build. To accept a specific finding, suppress it next to the code with `[Diagnostics.CodeAnalysis.SuppressMessageAttribute()]` and a `Justification`, so the exception is reviewed in the pull request that adds it.
+
+### Continuous integration
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every pull request and every push to `main`:
+
+| Job | Runs on |
+|---|---|
+| Lint | Ubuntu, PowerShell 7 |
+| Test | Ubuntu, macOS, and Windows on PowerShell 7, plus Windows PowerShell 5.1 |
+| Integration | macOS, with the pinned Graph SDK version |
+
+A weekly scheduled run also runs the integration tests against the latest Graph SDK, so SDK behavior changes show up before you upgrade.
 
 ## License
 
