@@ -694,6 +694,22 @@ function Send-GraphEmail {
     }
 }
 
+function Test-SendMailMessageReplyTo {
+    <#
+    .SYNOPSIS
+    Reports whether Send-MailMessage supports -ReplyTo in this PowerShell.
+
+    .DESCRIPTION
+    PowerShell 7's Send-MailMessage has a -ReplyTo parameter. Windows
+    PowerShell 5.1's does not.
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param()
+
+    (Get-Command Send-MailMessage).Parameters.ContainsKey('ReplyTo')
+}
+
 function Send-SmtpEmail {
     <#
     .SYNOPSIS
@@ -701,6 +717,10 @@ function Send-SmtpEmail {
 
     .DESCRIPTION
     Delivers an email message using SMTP via the Send-MailMessage cmdlet.
+
+    Windows PowerShell 5.1's Send-MailMessage cannot set a Reply-To header.
+    There, ReplyTo is left out of the message and a warning is written, so
+    the message is still delivered.
 
     .PARAMETER SmtpServer
     The SMTP server address.
@@ -786,7 +806,15 @@ function Send-SmtpEmail {
     }
 
     if ($ReplyTo -and $ReplyTo.Count -gt 0) {
-        $mailParams['ReplyTo'] = $ReplyTo
+        if (Test-SendMailMessageReplyTo) {
+            $mailParams['ReplyTo'] = $ReplyTo
+        }
+        else {
+            Write-Warning (
+                "Send-MailMessage in PowerShell $($PSVersionTable.PSVersion) can't set Reply-To. " +
+                "Sending without Reply-To ($($ReplyTo -join ', ')). Use Graph delivery or PowerShell 7 to keep it."
+            )
+        }
     }
 
     $attachments = @(

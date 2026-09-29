@@ -109,6 +109,8 @@ In the last row Graph may already have delivered the message, so `Send-Email` st
 
 `To`, `Cc`, `Bcc`, and `ReplyTo` are trimmed, and duplicates are removed without regard to case, before sending. `Send-Email` supports `-WhatIf` and `-Confirm`.
 
+On Windows PowerShell 5.1, SMTP delivery can't set a Reply-To header, because 5.1's `Send-MailMessage` has no `-ReplyTo` parameter. The message is sent without it and a warning is written. Graph delivery, and SMTP on PowerShell 7, keep Reply-To.
+
 ### Environment variables
 
 Scheduled tasks and other unattended jobs can be configured without changing the calling script. Explicit parameters always take precedence over these variables. For why the module relies on this much environment configuration, see [ADR 0001](docs/adr/0001-environment-variable-configuration.md).
