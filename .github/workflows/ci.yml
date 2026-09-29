@@ -1,0 +1,106 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    # Mondays 06:00 UTC: run the SDK integration tests against the latest
+    # Microsoft.Graph.Authentication to catch SDK behavior changes early.
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .tools
+          key: tools-lint-${{ hashFiles('build.ps1') }}
+
+      - name: PSScriptAnalyzer and manifests
+        shell: pwsh
+        run: ./build.ps1 -Task Lint
+
+  test:
+    name: Test (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: 'Linux, PowerShell 7', os: ubuntu-latest, shell: pwsh }
+          - { name: 'macOS, PowerShell 7', os: macos-latest, shell: pwsh }
+          - { name: 'Windows, PowerShell 7', os: windows-latest, shell: pwsh }
+          - { name: 'Windows PowerShell 5.1', os: windows-latest, shell: powershell }
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .tools
+          key: tools-test-${{ runner.os }}-${{ matrix.shell }}-${{ hashFiles('build.ps1') }}
+
+      - name: Pester unit tests
+        run: ./build.ps1 -Task Test
+
+      - name: Upload test results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: test-results-${{ runner.os }}-${{ matrix.shell }}
+          path: TestResults/
+          if-no-files-found: ignore
+
+  integration:
+    # macOS lets an unprivileged process bind port 80, which the SDK tests'
+    # stub Graph endpoint needs. See Modules/keel.Mail/Tests/keel.Mail.Sdk.Tests.ps1.
+    name: Integration (Graph SDK ${{ matrix.sdk }})
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Pinned on every run; latest only on the weekly schedule or when started by hand.
+        sdk: ${{ fromJSON((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '["pinned", "latest"]' || '["pinned"]') }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: ${{ matrix.sdk == 'pinned' }}
+        with:
+          path: .tools
+          key: tools-integration-${{ hashFiles('build.ps1') }}
+
+      - name: Pester integration tests
+        shell: pwsh
+        env:
+          SDK_CHANNEL: ${{ matrix.sdk }}
+        run: |
+          if ($env:SDK_CHANNEL -eq 'latest') {
+              ./build.ps1 -Task Integration -GraphSdkVersion Latest
+          }
+          else {
+              ./build.ps1 -Task Integration
+          }
+
+      - name: Upload test results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: integration-results-${{ matrix.sdk }}
+          path: TestResults/
+          if-no-files-found: ignore

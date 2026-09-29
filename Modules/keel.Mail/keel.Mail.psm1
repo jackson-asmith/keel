@@ -78,7 +78,7 @@ function Convert-ToGraphRecipient {
     }
 
     end {
-        $normalizeAddressList = Convert-EmailAddresses -AddressList $allAddresses
+        $normalizeAddressList = Convert-EmailAddress -AddressList $allAddresses
         Write-Debug "Convert-ToGraphRecipient: Processing $($normalizeAddressList.Count) addresses"
 
         $recipientList = @()
@@ -134,7 +134,7 @@ function ConvertTo-BooleanValue {
     }
 }
 
-function Convert-EmailAddresses {
+function Convert-EmailAddress {
     <#
     .SYNOPSIS
     Normalizes and deduplicates email addresses.
@@ -147,7 +147,7 @@ function Convert-EmailAddresses {
     An array of email addresses to normalize and deduplicate.
 
     .EXAMPLE
-    Convert-EmailAddresses -AddressList 'USER@contoso.com', 'user@contoso.com'
+    Convert-EmailAddress -AddressList 'USER@contoso.com', 'user@contoso.com'
     #>
     [CmdletBinding()]
     param(
@@ -237,6 +237,10 @@ function Connect-AutomationGraph {
     .EXAMPLE
     Connect-AutomationGraph
     #>
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute(
+        'PSAvoidUsingConvertToSecureStringWithPlainText', '',
+        Justification = 'The client secret arrives as plain text in KEEL_GRAPH_CLIENT_SECRET and must become a PSCredential for Connect-MgGraph.'
+    )]
     [CmdletBinding()]
     param ()
 
@@ -346,6 +350,10 @@ function New-GraphFileAttachment {
     .EXAMPLE
     New-GraphFileAttachment -Path 'C:\reports\summary.pdf'
     #>
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute(
+        'PSUseShouldProcessForStateChangingFunctions', '',
+        Justification = 'Builds an in-memory attachment object; changes no system state.'
+    )]
     [CmdletBinding()]
     param (
         [Parameter(Mandatory)]
@@ -686,6 +694,22 @@ function Send-GraphEmail {
     }
 }
 
+function Test-SendMailMessageReplyTo {
+    <#
+    .SYNOPSIS
+    Reports whether Send-MailMessage supports -ReplyTo in this PowerShell.
+
+    .DESCRIPTION
+    PowerShell 7's Send-MailMessage has a -ReplyTo parameter. Windows
+    PowerShell 5.1's does not.
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param()
+
+    (Get-Command Send-MailMessage).Parameters.ContainsKey('ReplyTo')
+}
+
 function Send-SmtpEmail {
     <#
     .SYNOPSIS
@@ -693,6 +717,10 @@ function Send-SmtpEmail {
 
     .DESCRIPTION
     Delivers an email message using SMTP via the Send-MailMessage cmdlet.
+
+    Windows PowerShell 5.1's Send-MailMessage cannot set a Reply-To header.
+    There, ReplyTo is left out of the message and a warning is written, so
+    the message is still delivered.
 
     .PARAMETER SmtpServer
     The SMTP server address.
@@ -778,7 +806,15 @@ function Send-SmtpEmail {
     }
 
     if ($ReplyTo -and $ReplyTo.Count -gt 0) {
-        $mailParams['ReplyTo'] = $ReplyTo
+        if (Test-SendMailMessageReplyTo) {
+            $mailParams['ReplyTo'] = $ReplyTo
+        }
+        else {
+            Write-Warning (
+                "Send-MailMessage in PowerShell $($PSVersionTable.PSVersion) can't set Reply-To. " +
+                "Sending without Reply-To ($($ReplyTo -join ', ')). Use Graph delivery or PowerShell 7 to keep it."
+            )
+        }
     }
 
     $attachments = @(
@@ -1129,7 +1165,7 @@ function Send-Email {
         throw 'Subject cannot be null, empty, or whitespace.'
     }
 
-    $normalizedTo = Convert-EmailAddresses -AddressList $To
+    $normalizedTo = Convert-EmailAddress -AddressList $To
 
     if ($normalizedTo.Count -eq 0) {
         throw 'To must include at least one non-empty recipient address.'
@@ -1137,14 +1173,14 @@ function Send-Email {
 
     # Parse and validate Cc with environment defaults
     if ($PSBoundParameters.ContainsKey('Cc')) {
-        $normalizedCc = Convert-EmailAddresses -AddressList $Cc
+        $normalizedCc = Convert-EmailAddress -AddressList $Cc
     }
     else {
         $ccFromEnv = $env:KEEL_MAIL_CC
         if (-not [string]::IsNullOrWhiteSpace($ccFromEnv)) {
             # Parse comma/semicolon-delimited values
             $ccAddresses = $ccFromEnv -split '[,;]' | ForEach-Object { $_.Trim() }
-            $normalizedCc = Convert-EmailAddresses -AddressList $ccAddresses
+            $normalizedCc = Convert-EmailAddress -AddressList $ccAddresses
             Write-Debug "Send-Email: Using CC from environment, resolved $($normalizedCc.Count) addresses"
         }
         else {
@@ -1159,14 +1195,14 @@ function Send-Email {
 
     # Parse and validate ReplyTo with environment defaults
     if ($PSBoundParameters.ContainsKey('ReplyTo')) {
-        $normalizedReplyTo = Convert-EmailAddresses -AddressList $ReplyTo
+        $normalizedReplyTo = Convert-EmailAddress -AddressList $ReplyTo
     }
     else {
         $replyToFromEnv = $env:KEEL_MAIL_REPLY_TO
         if (-not [string]::IsNullOrWhiteSpace($replyToFromEnv)) {
             # Parse comma/semicolon-delimited values
             $replyToAddresses = $replyToFromEnv -split '[,;]' | ForEach-Object { $_.Trim() }
-            $normalizedReplyTo = Convert-EmailAddresses -AddressList $replyToAddresses
+            $normalizedReplyTo = Convert-EmailAddress -AddressList $replyToAddresses
             Write-Debug "Send-Email: Using ReplyTo from environment, resolved $($normalizedReplyTo.Count) addresses"
         }
         else {
@@ -1179,7 +1215,7 @@ function Send-Email {
         throw 'ReplyTo must include at least one non-empty recipient address.'
     }
 
-    $normalizedBcc = Convert-EmailAddresses -AddressList $Bcc
+    $normalizedBcc = Convert-EmailAddress -AddressList $Bcc
 
     $normalizedFrom = $From.Trim()
     if ([string]::IsNullOrWhiteSpace($normalizedFrom)) {

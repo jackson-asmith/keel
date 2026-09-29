@@ -1,5 +1,11 @@
 #Requires -Modules @{ ModuleName = 'Pester'; ModuleVersion = '6.0.0' }
 
+BeforeDiscovery {
+    # Windows PowerShell 5.1's Send-MailMessage has no -ReplyTo, so Pester can't
+    # mock a call that passes it there.
+    $script:SendMailMessageHasReplyTo = (Get-Command Send-MailMessage).Parameters.ContainsKey('ReplyTo')
+}
+
 BeforeAll {
     $script:ModuleRoot = Split-Path -Parent $PSScriptRoot
     $script:ModulesRoot = Split-Path -Parent $ModuleRoot
@@ -143,26 +149,26 @@ Describe 'keel.Mail' {
         }
     }
 
-    Describe 'Convert-EmailAddresses' {
+    Describe 'Convert-EmailAddress' {
         It 'trims whitespace around each address' {
-            $result = InModuleScope keel.Mail { Convert-EmailAddresses -AddressList '  a@contoso.com ', "`tb@contoso.com" }
+            $result = InModuleScope keel.Mail { Convert-EmailAddress -AddressList '  a@contoso.com ', "`tb@contoso.com" }
             $result | Should-BeCollection @('a@contoso.com', 'b@contoso.com')
         }
 
         It 'removes case-insensitive duplicates, keeping the first spelling and original order' {
             $result = InModuleScope keel.Mail {
-                Convert-EmailAddresses -AddressList 'User@Contoso.com', 'b@contoso.com', 'user@contoso.com', ' USER@CONTOSO.COM '
+                Convert-EmailAddress -AddressList 'User@Contoso.com', 'b@contoso.com', 'user@contoso.com', ' USER@CONTOSO.COM '
             }
             $result | Should-BeCollection @('User@Contoso.com', 'b@contoso.com')
         }
 
         It 'skips null, empty, and whitespace-only entries' {
-            $result = InModuleScope keel.Mail { Convert-EmailAddresses -AddressList $null, '', '   ', 'a@contoso.com' }
+            $result = InModuleScope keel.Mail { Convert-EmailAddress -AddressList $null, '', '   ', 'a@contoso.com' }
             $result | Should-Be 'a@contoso.com'
         }
 
         It 'returns nothing for null input' {
-            $result = InModuleScope keel.Mail { Convert-EmailAddresses -AddressList $null }
+            $result = InModuleScope keel.Mail { Convert-EmailAddress -AddressList $null }
             @($result).Count | Should-Be 0
         }
     }
@@ -510,7 +516,8 @@ Describe 'keel.Mail' {
                 $script:RestCalls.Count | Should-Be 1
                 $call = $script:RestCalls[0]
                 $call.Method | Should-Be 'Post'
-                $call.Uri | Should-Be 'https://graph.microsoft.com/v1.0/users/sender%40contoso.com/sendMail'
+                # Compare the decoded URI: .NET Framework's Uri.ToString() turns %40 back into @.
+                [System.Uri]::UnescapeDataString($call.Uri) | Should-Be 'https://graph.microsoft.com/v1.0/users/sender@contoso.com/sendMail'
                 $call.Headers.Authorization | Should-Be 'Bearer token-123'
                 $call.ContentType | Should-Be 'application/json'
             }
@@ -942,7 +949,7 @@ Describe 'keel.Mail' {
             }
         }
 
-        It 'passes Cc, Bcc, ReplyTo, BodyAsHtml, and the resolved attachment path' {
+        It 'passes Cc, Bcc, BodyAsHtml, and the resolved attachment path' {
             $file = New-Item -Path (Join-Path $TestDrive 'smtp.txt') -ItemType File -Value 'x' -Force
 
             InModuleScope keel.Mail -Parameters @{ File = $file.FullName } {
@@ -953,7 +960,6 @@ Describe 'keel.Mail' {
                     To             = 'a@contoso.com'
                     Cc             = 'cc@contoso.com'
                     Bcc            = 'bcc@contoso.com'
-                    ReplyTo        = 'reply@contoso.com'
                     From           = 'f@contoso.com'
                     Body           = '<b>B</b>'
                     AttachmentPath = $File
@@ -966,9 +972,36 @@ Describe 'keel.Mail' {
             Should-Invoke Send-MailMessage -ModuleName keel.Mail -Times 1 -Exactly -ParameterFilter {
                 $Cc -eq 'cc@contoso.com' -and
                 $Bcc -eq 'bcc@contoso.com' -and
-                $ReplyTo -eq 'reply@contoso.com' -and
                 $Attachments -eq $expectedPath -and
                 $BodyAsHtml
+            }
+        }
+
+        It 'passes ReplyTo when Send-MailMessage supports it' -Skip:(-not $SendMailMessageHasReplyTo) {
+            Mock Write-Warning -ModuleName keel.Mail { }
+
+            InModuleScope keel.Mail {
+                Send-SmtpEmail -SmtpServer 's' -Subject 'Hi' -To 'a@contoso.com' -ReplyTo 'reply@contoso.com' -From 'f@contoso.com' -Body 'B'
+            }
+
+            Should-Invoke Send-MailMessage -ModuleName keel.Mail -Times 1 -Exactly -ParameterFilter { $ReplyTo -eq 'reply@contoso.com' }
+            Should-NotInvoke Write-Warning -ModuleName keel.Mail
+        }
+
+        It 'sends without Reply-To, and warns, when Send-MailMessage has no -ReplyTo' {
+            # Simulates Windows PowerShell 5.1 on any runtime.
+            Mock Test-SendMailMessageReplyTo -ModuleName keel.Mail { $false }
+            Mock Write-Warning -ModuleName keel.Mail { }
+
+            InModuleScope keel.Mail {
+                Send-SmtpEmail -SmtpServer 's' -Subject 'Hi' -To 'a@contoso.com' -ReplyTo 'reply@contoso.com' -From 'f@contoso.com' -Body 'B'
+            }
+
+            Should-Invoke Send-MailMessage -ModuleName keel.Mail -Times 1 -Exactly -ParameterFilter {
+                -not $PesterBoundParameters.ContainsKey('ReplyTo')
+            }
+            Should-Invoke Write-Warning -ModuleName keel.Mail -Times 1 -Exactly -ParameterFilter {
+                $Message -like "*can't set Reply-To*reply@contoso.com*"
             }
         }
 
@@ -1202,7 +1235,10 @@ Describe 'keel.Mail' {
             }
 
             It 'trims and de-duplicates To, Cc, and Bcc before delivery' {
-                Send-Email @BaseMail -To ' a@contoso.com', 'A@contoso.com', 'b@contoso.com' -Cc 'c@contoso.com ', 'C@contoso.com' -Bcc ' d@contoso.com'
+                # Windows PowerShell 5.1 rejects a parameter given both in a splat and explicitly.
+                $mail = $BaseMail.Clone()
+                $mail.To = ' a@contoso.com', 'A@contoso.com', 'b@contoso.com'
+                Send-Email @mail -Cc 'c@contoso.com ', 'C@contoso.com' -Bcc ' d@contoso.com'
 
                 Should-Invoke Invoke-Delivery -ModuleName keel.Mail -Times 1 -Exactly -ParameterFilter {
                     ($To -join ',') -eq 'a@contoso.com,b@contoso.com' -and
@@ -1212,7 +1248,9 @@ Describe 'keel.Mail' {
             }
 
             It 'trims From and uses it as the Graph sender when no sender is given' {
-                Send-Email @BaseMail -From '  automation@contoso.com  '
+                $mail = $BaseMail.Clone()
+                $mail.From = '  automation@contoso.com  '
+                Send-Email @mail
 
                 Should-Invoke Invoke-Delivery -ModuleName keel.Mail -Times 1 -Exactly -ParameterFilter {
                     $From -eq 'automation@contoso.com' -and $GraphSenderUserId -eq 'automation@contoso.com'
@@ -1433,7 +1471,7 @@ Describe 'keel.Mail' {
                 Send-Email @BaseMail -GraphAccessToken 'tok' -Cc 'cc@contoso.com'
 
                 $script:RestCalls.Count | Should-Be 1
-                $script:RestCalls[0].Uri | Should-Be 'https://graph.microsoft.com/v1.0/users/automation%40contoso.com/sendMail'
+                [System.Uri]::UnescapeDataString($script:RestCalls[0].Uri) | Should-Be 'https://graph.microsoft.com/v1.0/users/automation@contoso.com/sendMail'
                 $message = ($script:RestCalls[0].Body | ConvertFrom-Json).message
                 (Get-RecipientAddress $message.toRecipients) | Should-Be 'ops@contoso.com'
                 (Get-RecipientAddress $message.ccRecipients) | Should-Be 'cc@contoso.com'
