@@ -27,6 +27,8 @@ $script:StatusCodeMessagePatterns = @(
     '\bHTTP(?:/\d(?:\.\d)?)?\s+(?<code>\d{3})\b'
     '\bstatus\s*code\s*[:=]?\s*(?<code>\d{3})\b'
     '\bstatus\s*[:=]\s*(?<code>\d{3})\b'
+    # Graph SDK retry handler, after it gives up: "HTTP request failed with status code: GatewayTimeout."
+    '\bstatus\s*code:\s*(?<code>[A-Za-z]+)\b'
 )
 
 function ConvertTo-HttpStatusCode {

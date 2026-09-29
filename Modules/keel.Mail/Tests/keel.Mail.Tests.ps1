@@ -20,6 +20,8 @@ BeforeAll {
         }
         'Get-MgContext'          = { param() }
         'Invoke-MgGraphRequest'  = { param($Method, $Uri, $Body, $ContentType) }
+        'Get-MgRequestContext'   = { param() }
+        'Set-MgRequestContext'   = { param($MaxRetry, $RetryDelay, $RetriesTimeLimit) }
     }
     foreach ($name in $stubs.Keys) {
         if (-not (Get-Command $name -ErrorAction SilentlyContinue)) {
@@ -431,6 +433,12 @@ Describe 'keel.Mail' {
             Test-Refused $record | Should-BeFalse
         }
 
+        It 'reports a failure marked NotSent as refused' {
+            $exception = [System.Exception]::new('Could not prepare the request.')
+            $exception.Data['KeelDeliveryState'] = 'NotSent'
+            Test-Refused (New-FailureRecord $exception) | Should-BeTrue
+        }
+
         It 'reports a failure with no status or connection detail as possibly delivered' {
             $record = New-FailureRecord ([System.Exception]::new('The operation has timed out.'))
             Test-Refused $record | Should-BeFalse
@@ -736,6 +744,109 @@ Describe 'keel.Mail' {
             BeforeEach {
                 Mock Invoke-MgGraphRequest -ModuleName keel.Mail { }
                 Mock Connect-AutomationGraph -ModuleName keel.Mail { }
+                Mock Get-MgRequestContext -ModuleName keel.Mail {
+                    [pscustomobject]@{ MaxRetry = 3; RetryDelay = 3; RetriesTimeLimit = [TimeSpan]::Zero }
+                }
+                Mock Set-MgRequestContext -ModuleName keel.Mail { }
+            }
+
+            It 'turns off SDK retries for the send and restores the caller settings afterward' {
+                Mock Get-MgContext -ModuleName keel.Mail { [pscustomobject]@{ TenantId = 'tenant-id' } }
+                Mock Get-MgRequestContext -ModuleName keel.Mail {
+                    [pscustomobject]@{ MaxRetry = 5; RetryDelay = 2; RetriesTimeLimit = [TimeSpan]::FromSeconds(30) }
+                }
+                $script:SdkCalls = [System.Collections.Generic.List[string]]::new()
+                Mock Set-MgRequestContext -ModuleName keel.Mail {
+                    $script:SdkCalls.Add(('set MaxRetry={0} RetryDelay={1} RetriesTimeLimit={2}' -f $MaxRetry, $RetryDelay, $RetriesTimeLimit))
+                }
+                Mock Invoke-MgGraphRequest -ModuleName keel.Mail { $script:SdkCalls.Add('send') }
+
+                InModuleScope keel.Mail {
+                    Send-GraphEmail -SendUserId 's@contoso.com' -Subject 'Hi' -To 'a@contoso.com' -Body 'B'
+                }
+
+                $script:SdkCalls | Should-BeCollection @(
+                    'set MaxRetry=0 RetryDelay= RetriesTimeLimit='
+                    'send'
+                    'set MaxRetry=5 RetryDelay=2 RetriesTimeLimit=30'
+                )
+            }
+
+            It 'restores the caller settings when the send fails' {
+                Mock Get-MgContext -ModuleName keel.Mail { [pscustomobject]@{ TenantId = 'tenant-id' } }
+                Mock Invoke-MgGraphRequest -ModuleName keel.Mail {
+                    throw 'Response status code does not indicate success: GatewayTimeout (Gateway Timeout).'
+                }
+
+                {
+                    InModuleScope keel.Mail {
+                        Send-GraphEmail -SendUserId 's@contoso.com' -Subject 'Hi' -To 'a@contoso.com' -Body 'B'
+                    }
+                } | Should-Throw -ExceptionMessage '*may have been delivered*'
+
+                Should-Invoke Set-MgRequestContext -ModuleName keel.Mail -Times 1 -Exactly -ParameterFilter { $MaxRetry -eq 0 }
+                Should-Invoke Set-MgRequestContext -ModuleName keel.Mail -Times 1 -Exactly -ParameterFilter { $MaxRetry -eq 3 -and $RetryDelay -eq 3 -and $RetriesTimeLimit -eq 0 }
+            }
+
+            It 'warns, but still reports a successful send, when the settings cannot be restored' {
+                Mock Get-MgContext -ModuleName keel.Mail { [pscustomobject]@{ TenantId = 'tenant-id' } }
+                Mock Set-MgRequestContext -ModuleName keel.Mail -ParameterFilter { $MaxRetry -ne 0 } { throw 'restore failed' }
+                Mock Write-Warning -ModuleName keel.Mail { }
+
+                InModuleScope keel.Mail {
+                    Send-GraphEmail -SendUserId 's@contoso.com' -Subject 'Hi' -To 'a@contoso.com' -Body 'B'
+                }
+
+                Should-Invoke Invoke-MgGraphRequest -ModuleName keel.Mail -Times 1 -Exactly
+                Should-Invoke Write-Warning -ModuleName keel.Mail -Times 1 -Exactly -ParameterFilter { $Message -like '*Could not restore the Graph SDK request context*restore failed*' }
+            }
+
+            It 'does not send, and allows fallback, when SDK retries cannot be turned off' {
+                Mock Get-MgContext -ModuleName keel.Mail { [pscustomobject]@{ TenantId = 'tenant-id' } }
+                Mock Set-MgRequestContext -ModuleName keel.Mail { throw 'cannot change request context' }
+
+                $thrown = $null
+                try {
+                    InModuleScope keel.Mail {
+                        Send-GraphEmail -SendUserId 's@contoso.com' -Subject 'Hi' -To 'a@contoso.com' -Body 'B'
+                    }
+                }
+                catch {
+                    $thrown = $_
+                }
+
+                $thrown.Exception.Message | Should-BeLikeString '*cannot change request context*'
+                $thrown.Exception.Data['KeelDeliveryState'] | Should-Be 'NotSent'
+                Should-NotInvoke Invoke-MgGraphRequest -ModuleName keel.Mail
+            }
+
+            It 'falls back to SMTP when SDK retries cannot be turned off' {
+                Mock Get-MgContext -ModuleName keel.Mail { [pscustomobject]@{ TenantId = 'tenant-id' } }
+                Mock Set-MgRequestContext -ModuleName keel.Mail { throw 'cannot change request context' }
+                Mock Send-SmtpEmail -ModuleName keel.Mail { }
+                Mock Write-Warning -ModuleName keel.Mail { }
+
+                InModuleScope keel.Mail {
+                    Invoke-Delivery -DeliveryMethod Graph -Subject 'Hi' -To 'a@contoso.com' -From 'f@contoso.com' -Body 'B' `
+                        -GraphSenderUserId 's@contoso.com' -SmtpServer 'smtp.contoso.com' -AllowSmtpFallback
+                }
+
+                Should-NotInvoke Invoke-MgGraphRequest -ModuleName keel.Mail
+                Should-Invoke Send-SmtpEmail -ModuleName keel.Mail -Times 1 -Exactly
+            }
+
+            It 'does not send when the SDK request context cannot be read' {
+                Mock Get-MgContext -ModuleName keel.Mail { [pscustomobject]@{ TenantId = 'tenant-id' } }
+                Mock Get-MgRequestContext -ModuleName keel.Mail { }
+
+                {
+                    InModuleScope keel.Mail {
+                        Send-GraphEmail -SendUserId 's@contoso.com' -Subject 'Hi' -To 'a@contoso.com' -Body 'B'
+                    }
+                } | Should-Throw -ExceptionMessage 'Could not read the Graph SDK request context*'
+
+                Should-NotInvoke Invoke-MgGraphRequest -ModuleName keel.Mail
+                Should-NotInvoke Set-MgRequestContext -ModuleName keel.Mail
             }
 
             It 'uses the existing SDK session without reconnecting' {

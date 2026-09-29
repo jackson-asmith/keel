@@ -99,6 +99,8 @@ If Graph refuses the message, a warning with the Graph error is written and the 
 | Problem found before sending, such as an attachment over 3 MB | No | Yes |
 | 500, 502, or 504, a timeout, or a connection dropped mid-request | No | **No** |
 
+This applies whether `Send-Email` calls Graph directly with an access token or through the Graph PowerShell SDK. The SDK normally retries 429, 503, and 504 on its own, so `keel.Mail` turns the SDK's retries off for each `sendMail` request and restores your settings afterward. Because the SDK's retry settings are process-wide, other Graph calls running in parallel in the same process also skip SDK retries while a message is being sent.
+
 In the last row Graph may already have delivered the message, so `Send-Email` stops with a `GraphDeliveryUnknown` error, and `$_.Exception.Data['KeelDeliveryState']` is `Unknown`. Check the sender's message trace before resending. See [ADR 0002](docs/adr/0002-no-resend-after-ambiguous-graph-failure.md) for the reasoning.
 
 ### Recipients
@@ -197,6 +199,12 @@ Invoke-Pester ./Modules -Output Detailed
 ```
 
 Each module keeps its tests in its own `Tests` folder. All network calls, SMTP sends, and sleeps are mocked, so the tests need no Graph tenant, SMTP server, or network access. If the Microsoft Graph SDK isn't installed, the tests stub the commands they need.
+
+`keel.Mail.Sdk.Tests.ps1` is an integration test for the Graph SDK path. It runs the real `Microsoft.Graph.Authentication` module against a stub Graph endpoint on your machine, so it still needs no tenant and sends no mail. It needs the SDK installed and permission to listen on port 80 (macOS allows this; Linux and Windows usually need elevation), and skips itself otherwise. To run only these tests:
+
+```powershell
+Invoke-Pester ./Modules -TagFilter Integration -Output Detailed
+```
 
 ## License
 

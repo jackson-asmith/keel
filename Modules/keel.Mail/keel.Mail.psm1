@@ -377,6 +377,9 @@ function Test-GraphSendRefused {
     - A connection failure with no response: name resolution, connection,
       TLS, or proxy tunnel errors raised before the request was sent.
 
+    - A failure raised before the request was sent, marked with
+      Exception.Data['KeelDeliveryState'] = 'NotSent'.
+
     Returns $false for anything else, including 500, 502, and 504 responses,
     timeouts, and connections dropped mid-request. In those cases Graph may
     have accepted the message before the failure.
@@ -390,6 +393,10 @@ function Test-GraphSendRefused {
         [Parameter(Mandatory)]
         [System.Management.Automation.ErrorRecord]$ErrorRecord
     )
+
+    if ($ErrorRecord.Exception.Data['KeelDeliveryState'] -eq 'NotSent') {
+        return $true
+    }
 
     $statusCode = Get-RetryableStatusCode -ErrorRecord $ErrorRecord
     if ($null -ne $statusCode) {
@@ -411,6 +418,78 @@ function Test-GraphSendRefused {
     }
 
     $false
+}
+
+function Invoke-GraphRequestWithoutSdkRetry {
+    <#
+    .SYNOPSIS
+    Calls Invoke-MgGraphRequest with the Graph SDK's own retries turned off.
+
+    .DESCRIPTION
+    The Microsoft Graph PowerShell SDK sends every Invoke-MgGraphRequest call
+    through a retry handler that retries 429, 503, and 504 responses, up to
+    MaxRetry times (3 by default), including POSTs with a buffered body. For
+    sendMail that means one 504 can resend the message several times before
+    Keel sees an error.
+
+    This function sets the SDK's MaxRetry to 0 for one request and then
+    restores the caller's settings, so Invoke-WithBoundedRetry is the only
+    thing that decides what to retry.
+
+    The SDK's request context is process-wide. While the request is in flight,
+    other Graph calls running in parallel in the same process also run without
+    SDK retries.
+
+    .PARAMETER Parameters
+    The parameters to splat into Invoke-MgGraphRequest.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [hashtable]$Parameters
+    )
+
+    # Nothing has been sent yet. Mark any failure here as NotSent so the caller
+    # knows it is safe to fall back to SMTP.
+    try {
+        $saved = Get-MgRequestContext
+        if ($null -eq $saved) {
+            throw 'Could not read the Graph SDK request context, so SDK retries could not be disabled. The message was not sent.'
+        }
+
+        # Get-MgRequestContext reports RetriesTimeLimit as a TimeSpan, but
+        # Set-MgRequestContext takes whole seconds.
+        $retriesTimeLimit = $saved.RetriesTimeLimit
+        $restore = @{
+            MaxRetry         = $saved.MaxRetry
+            RetryDelay       = $saved.RetryDelay
+            RetriesTimeLimit = if ($retriesTimeLimit -is [TimeSpan]) { [int]$retriesTimeLimit.TotalSeconds } elseif ($null -ne $retriesTimeLimit) { [int]$retriesTimeLimit } else { 0 }
+        }
+
+        Set-MgRequestContext -MaxRetry 0 | Out-Null
+    }
+    catch {
+        $_.Exception.Data['KeelDeliveryState'] = 'NotSent'
+        throw
+    }
+
+    try {
+        Invoke-MgGraphRequest @Parameters
+    }
+    finally {
+        # A failure to restore must not change what happened to the message, so
+        # it is reported as a warning rather than thrown.
+        try {
+            Set-MgRequestContext @restore | Out-Null
+        }
+        catch {
+            Write-Warning (
+                'Could not restore the Graph SDK request context ' +
+                "(MaxRetry $($restore.MaxRetry), RetryDelay $($restore.RetryDelay), RetriesTimeLimit $($restore.RetriesTimeLimit)): " +
+                $_.Exception.Message
+            )
+        }
+    }
 }
 
 function Send-GraphEmail {
@@ -571,7 +650,8 @@ function Send-GraphEmail {
             Body        = $requestBody
             ContentType = 'application/json'
         }
-        $sendRequest = { Invoke-MgGraphRequest @graphRequestParams }
+        # The SDK would otherwise retry 504s on its own and resend the message.
+        $sendRequest = { Invoke-GraphRequestWithoutSdkRetry -Parameters $graphRequestParams }
     }
 
     else {

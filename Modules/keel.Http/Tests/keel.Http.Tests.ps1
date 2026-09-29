@@ -147,6 +147,9 @@ Describe 'Get-RetryableStatusCode' {
             @{ Source = 'HTTP prefix'; Message = 'Request failed with HTTP 504'; Expected = 504 }
             @{ Source = 'status code label'; Message = 'Request failed. StatusCode: 408'; Expected = 408 }
             @{ Source = 'status= label'; Message = 'request error status=500 path=/api'; Expected = 500 }
+            # Verbatim from Microsoft.Graph.Authentication 2.40.0 after its retry handler gave up.
+            @{ Source = 'Graph SDK retries exhausted (504)'; Message = 'Too many retries performed. More than 3 retries encountered while sending the request. (HTTP request failed with status code: GatewayTimeout.) (HTTP request failed with status code: GatewayTimeout.)'; Expected = 504 }
+            @{ Source = 'Graph SDK retries exhausted (429)'; Message = 'Too many retries performed. More than 3 retries encountered while sending the request. (HTTP request failed with status code: TooManyRequests.)'; Expected = 429 }
         ) {
             Get-RetryableStatusCode -ErrorRecord (New-HttpErrorRecord -Message $Message) | Should-Be $Expected
         }
@@ -158,6 +161,11 @@ Describe 'Get-RetryableStatusCode' {
             @{ Message = 'Response status code does not indicate success: NotARealStatus (Nope).' }
         ) {
             Get-RetryableStatusCode -ErrorRecord (New-HttpErrorRecord -Message $Message) | Should-BeNull
+        }
+
+        It 'ignores a status label followed by a word that is not a status name' {
+            $record = New-HttpErrorRecord -Message 'Request failed with status code: Unknown.'
+            Get-RetryableStatusCode -ErrorRecord $record | Should-BeNull
         }
 
         It 'returns nothing when no status code can be determined' {
