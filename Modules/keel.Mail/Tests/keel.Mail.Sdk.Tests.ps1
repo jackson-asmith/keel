@@ -39,7 +39,7 @@ BeforeDiscovery {
     }
 
     if ($SkipReason) {
-        Write-Host "Skipping keel.Mail SDK integration tests. $SkipReason" -ForegroundColor Yellow
+        Write-Warning "Skipping keel.Mail SDK integration tests. $SkipReason"
     }
 }
 
@@ -198,7 +198,7 @@ Describe 'keel.Mail through the Microsoft Graph SDK' -Tag Integration -Skip:([bo
         Set-StubResponse -Default $Status
         Set-MgRequestContext -MaxRetry 5 -RetryDelay 2 -RetriesTimeLimit 30 | Out-Null
 
-        try { Send-Email @Mail } catch { }
+        try { Send-Email @Mail } catch { Write-Verbose "Send-Email failed as expected for status ${Status}: $_" }
 
         $after = Get-MgRequestContext
         $after.MaxRetry | Should-Be 5

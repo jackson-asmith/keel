@@ -53,7 +53,8 @@ function ConvertTo-HttpStatusCode {
             $statusCode = [int][System.Net.HttpStatusCode]"$Value"
         }
         catch {
-            $statusCode = $null
+            # .NET Framework (Windows PowerShell 5.1) has no name for 429.
+            $statusCode = if ("$Value" -eq 'TooManyRequests') { 429 } else { $null }
         }
     }
 
@@ -62,7 +63,7 @@ function ConvertTo-HttpStatusCode {
     }
 }
 
-function Get-RetryAfterMilliseconds {
+function Get-RetryAfterDelay {
     <#
     .SYNOPSIS
     Reads the Retry-After header from a failed HTTP response.
@@ -141,7 +142,7 @@ function Get-RetryAfterMilliseconds {
     }
 
     $milliseconds = [Math]::Max([double]0, [Math]::Ceiling($delay.TotalMilliseconds))
-    Write-Debug "Get-RetryAfterMilliseconds: Server requested a $milliseconds ms wait"
+    Write-Debug "Get-RetryAfterDelay: Server requested a $milliseconds ms wait"
     [long]$milliseconds
 }
 
@@ -326,7 +327,7 @@ function Invoke-WithBoundedRetry {
             }
 
             $jitterMilliseconds = Get-Random -Minimum 0 -Maximum 250
-            $retryAfterMilliseconds = Get-RetryAfterMilliseconds -ErrorRecord $_
+            $retryAfterMilliseconds = Get-RetryAfterDelay -ErrorRecord $_
 
             if ($null -ne $retryAfterMilliseconds) {
                 if ($retryAfterMilliseconds -gt ($MaxRetryAfterSeconds * 1000)) {

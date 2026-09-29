@@ -143,26 +143,26 @@ Describe 'keel.Mail' {
         }
     }
 
-    Describe 'Convert-EmailAddresses' {
+    Describe 'Convert-EmailAddress' {
         It 'trims whitespace around each address' {
-            $result = InModuleScope keel.Mail { Convert-EmailAddresses -AddressList '  a@contoso.com ', "`tb@contoso.com" }
+            $result = InModuleScope keel.Mail { Convert-EmailAddress -AddressList '  a@contoso.com ', "`tb@contoso.com" }
             $result | Should-BeCollection @('a@contoso.com', 'b@contoso.com')
         }
 
         It 'removes case-insensitive duplicates, keeping the first spelling and original order' {
             $result = InModuleScope keel.Mail {
-                Convert-EmailAddresses -AddressList 'User@Contoso.com', 'b@contoso.com', 'user@contoso.com', ' USER@CONTOSO.COM '
+                Convert-EmailAddress -AddressList 'User@Contoso.com', 'b@contoso.com', 'user@contoso.com', ' USER@CONTOSO.COM '
             }
             $result | Should-BeCollection @('User@Contoso.com', 'b@contoso.com')
         }
 
         It 'skips null, empty, and whitespace-only entries' {
-            $result = InModuleScope keel.Mail { Convert-EmailAddresses -AddressList $null, '', '   ', 'a@contoso.com' }
+            $result = InModuleScope keel.Mail { Convert-EmailAddress -AddressList $null, '', '   ', 'a@contoso.com' }
             $result | Should-Be 'a@contoso.com'
         }
 
         It 'returns nothing for null input' {
-            $result = InModuleScope keel.Mail { Convert-EmailAddresses -AddressList $null }
+            $result = InModuleScope keel.Mail { Convert-EmailAddress -AddressList $null }
             @($result).Count | Should-Be 0
         }
     }

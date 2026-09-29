@@ -2,7 +2,7 @@
 
 BeforeDiscovery {
     # -Skip conditions are evaluated during discovery, before BeforeAll runs.
-    $IsPs7 = [bool]('Microsoft.PowerShell.Commands.HttpResponseException' -as [type])
+    $script:IsPs7 = [bool]('Microsoft.PowerShell.Commands.HttpResponseException' -as [type])
 }
 
 BeforeAll {
@@ -471,21 +471,21 @@ Describe 'Invoke-WithBoundedRetry' {
     }
 }
 
-Describe 'Get-RetryAfterMilliseconds' {
+Describe 'Get-RetryAfterDelay' {
     It 'is not exported' {
-        (Get-Module keel.Http).ExportedFunctions.Keys -contains 'Get-RetryAfterMilliseconds' | Should-BeFalse
+        (Get-Module keel.Http).ExportedFunctions.Keys -contains 'Get-RetryAfterDelay' | Should-BeFalse
     }
 
     Context 'PowerShell 7 typed headers' -Skip:(-not $IsPs7) {
         It 'reads a delta-seconds Retry-After' {
             $errorRecord = New-Ps7ThrottleErrorRecord -RetryAfterDelta ([TimeSpan]::FromSeconds(7))
-            InModuleScope keel.Http -Parameters @{ E = $errorRecord } { param($E) Get-RetryAfterMilliseconds -ErrorRecord $E } |
+            InModuleScope keel.Http -Parameters @{ E = $errorRecord } { param($E) Get-RetryAfterDelay -ErrorRecord $E } |
                 Should-Be 7000
         }
 
         It 'reads an HTTP-date Retry-After as the time remaining' {
             $errorRecord = New-Ps7ThrottleErrorRecord -RetryAfterDate ([DateTimeOffset]::UtcNow.AddSeconds(30))
-            $result = InModuleScope keel.Http -Parameters @{ E = $errorRecord } { param($E) Get-RetryAfterMilliseconds -ErrorRecord $E }
+            $result = InModuleScope keel.Http -Parameters @{ E = $errorRecord } { param($E) Get-RetryAfterDelay -ErrorRecord $E }
 
             $result | Should-BeGreaterThan 25000
             $result | Should-BeLessThanOrEqual 30000
@@ -493,7 +493,7 @@ Describe 'Get-RetryAfterMilliseconds' {
 
         It 'returns nothing when the response has no Retry-After header' {
             $errorRecord = New-Ps7ThrottleErrorRecord
-            InModuleScope keel.Http -Parameters @{ E = $errorRecord } { param($E) Get-RetryAfterMilliseconds -ErrorRecord $E } |
+            InModuleScope keel.Http -Parameters @{ E = $errorRecord } { param($E) Get-RetryAfterDelay -ErrorRecord $E } |
                 Should-BeNull
         }
     }
@@ -501,20 +501,20 @@ Describe 'Get-RetryAfterMilliseconds' {
     Context 'Windows PowerShell 5.1 style string headers' {
         It 'reads delta-seconds' {
             $errorRecord = New-HttpErrorRecord -StatusCode 429 -Headers @{ 'Retry-After' = '12' }
-            InModuleScope keel.Http -Parameters @{ E = $errorRecord } { param($E) Get-RetryAfterMilliseconds -ErrorRecord $E } |
+            InModuleScope keel.Http -Parameters @{ E = $errorRecord } { param($E) Get-RetryAfterDelay -ErrorRecord $E } |
                 Should-Be 12000
         }
 
         It 'matches the header name case-insensitively' {
             $errorRecord = New-HttpErrorRecord -StatusCode 429 -Headers @{ 'retry-after' = '3' }
-            InModuleScope keel.Http -Parameters @{ E = $errorRecord } { param($E) Get-RetryAfterMilliseconds -ErrorRecord $E } |
+            InModuleScope keel.Http -Parameters @{ E = $errorRecord } { param($E) Get-RetryAfterDelay -ErrorRecord $E } |
                 Should-Be 3000
         }
 
         It 'reads an HTTP-date as the time remaining' {
             $date = [DateTimeOffset]::UtcNow.AddSeconds(20).ToString('r', [System.Globalization.CultureInfo]::InvariantCulture)
             $errorRecord = New-HttpErrorRecord -StatusCode 429 -Headers @{ 'Retry-After' = $date }
-            $result = InModuleScope keel.Http -Parameters @{ E = $errorRecord } { param($E) Get-RetryAfterMilliseconds -ErrorRecord $E }
+            $result = InModuleScope keel.Http -Parameters @{ E = $errorRecord } { param($E) Get-RetryAfterDelay -ErrorRecord $E }
 
             $result | Should-BeGreaterThan 15000
             $result | Should-BeLessThanOrEqual 20000
@@ -522,13 +522,13 @@ Describe 'Get-RetryAfterMilliseconds' {
 
         It 'treats an HTTP-date in the past as zero' {
             $errorRecord = New-HttpErrorRecord -StatusCode 429 -Headers @{ 'Retry-After' = 'Wed, 21 Oct 2015 07:28:00 GMT' }
-            InModuleScope keel.Http -Parameters @{ E = $errorRecord } { param($E) Get-RetryAfterMilliseconds -ErrorRecord $E } |
+            InModuleScope keel.Http -Parameters @{ E = $errorRecord } { param($E) Get-RetryAfterDelay -ErrorRecord $E } |
                 Should-Be 0
         }
 
         It 'returns nothing for an unparseable value' {
             $errorRecord = New-HttpErrorRecord -StatusCode 429 -Headers @{ 'Retry-After' = 'soon' }
-            InModuleScope keel.Http -Parameters @{ E = $errorRecord } { param($E) Get-RetryAfterMilliseconds -ErrorRecord $E } |
+            InModuleScope keel.Http -Parameters @{ E = $errorRecord } { param($E) Get-RetryAfterDelay -ErrorRecord $E } |
                 Should-BeNull
         }
 
@@ -536,8 +536,8 @@ Describe 'Get-RetryAfterMilliseconds' {
             $noHeaders = New-HttpErrorRecord -StatusCode 429
             $noResponse = New-HttpErrorRecord -Message 'HTTP 429'
 
-            InModuleScope keel.Http -Parameters @{ E = $noHeaders } { param($E) Get-RetryAfterMilliseconds -ErrorRecord $E } | Should-BeNull
-            InModuleScope keel.Http -Parameters @{ E = $noResponse } { param($E) Get-RetryAfterMilliseconds -ErrorRecord $E } | Should-BeNull
+            InModuleScope keel.Http -Parameters @{ E = $noHeaders } { param($E) Get-RetryAfterDelay -ErrorRecord $E } | Should-BeNull
+            InModuleScope keel.Http -Parameters @{ E = $noResponse } { param($E) Get-RetryAfterDelay -ErrorRecord $E } | Should-BeNull
         }
     }
 }
