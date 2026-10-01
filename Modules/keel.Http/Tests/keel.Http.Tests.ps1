@@ -6,6 +6,10 @@ BeforeDiscovery {
 }
 
 BeforeAll {
+    # Windows PowerShell 5.1 does not load System.Net.Http by default. Load it so the
+    # tests below don't depend on something else (such as a module download) loading it first.
+    Add-Type -AssemblyName System.Net.Http
+
     $script:ModuleRoot = Split-Path -Parent $PSScriptRoot
     $script:ManifestPath = Join-Path $ModuleRoot 'keel.Http.psd1'
 
