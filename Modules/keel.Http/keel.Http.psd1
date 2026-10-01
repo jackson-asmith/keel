@@ -5,7 +5,7 @@
     Author            = 'jackson-asmith'
     Copyright         = '(c) 2026 jackson-asmith. Licensed under the MIT License.'
     CompanyName       = 'jacksonasmith.com'
-    Description       = 'Transport-agnostic HTTP retry primitive for REST API calls in automation workflows. Supports Graph, Atlassian, ServiceNow, and any endpoint using standard HTTP throttling codes.'
+    Description       = 'Transport-agnostic HTTP retry primitive for REST API calls in automation workflows. Works with any REST API that uses standard HTTP status codes for throttling and transient errors.'
     PowerShellVersion = '5.1'
     FunctionsToExport = @(
         'Get-RetryableStatusCode'

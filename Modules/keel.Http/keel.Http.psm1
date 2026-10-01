@@ -4,9 +4,8 @@ HTTP retry helpers for REST API calls in automation workflows.
 
 .DESCRIPTION
 Provides transport-agnostic retry primitives for REST API calls. Functions in
-this module are not specific to any API vendor and can be reused across Graph,
-Atlassian, ServiceNow, or any other endpoint that uses standard HTTP throttling
-and transient error codes.
+this module are not specific to any API vendor and can be reused with any REST
+API that uses standard HTTP throttling and transient error codes.
 
 The public entry points are Get-RetryableStatusCode and Invoke-WithBoundedRetry.
 #>
