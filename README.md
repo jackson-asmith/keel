@@ -9,7 +9,7 @@ PowerShell modules for unattended automation: Graph-first email delivery and bou
 | [`keel.Mail`](Modules/keel.Mail) | Sends email through Microsoft Graph by default, with explicit SMTP delivery or automatic SMTP fallback when needed. |
 | [`keel.Http`](Modules/keel.Http) | Vendor-neutral retry helpers for REST calls. Exponential backoff with jitter, `Retry-After` support, and status-code detection across PowerShell versions. |
 
-`keel.Mail` depends on `keel.Http`. You can use `keel.Http` on its own for Graph, Atlassian, ServiceNow, or any API that uses standard HTTP throttling codes.
+`keel.Mail` depends on `keel.Http`. You can use `keel.Http` on its own with any REST API that uses standard HTTP status codes for throttling and transient errors.
 
 ## Requirements
 
