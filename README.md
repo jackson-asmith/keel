@@ -11,6 +11,10 @@ PowerShell modules for unattended automation: Graph-first email delivery and bou
 
 `keel.Mail` depends on `keel.Http`. You can use `keel.Http` on its own with any REST API that uses standard HTTP status codes for throttling and transient errors.
 
+## Why not just use Send-MgUserMail?
+
+For a few scripts, you should: `Connect-MgGraph` plus `Send-MgUserMail` is a handful of lines, and a library would only add overhead. keel is for a fleet of scheduled scripts moving off `Send-MailMessage`. There, every direct Graph call would repeat the same app-only authentication, message shaping, and failure handling, and a fix in one script wouldn't reach the others. One example is turning off the Graph SDK's own retries, which can deliver a message twice. keel puts all of that behind `Send-Email`, which takes `Send-MailMessage`-style parameters. See [ADR 0003](docs/adr/0003-wrap-graph-mail-behind-send-email.md) for the trade-offs, including what you give up.
+
 ## Requirements
 
 - Windows PowerShell 5.1 or PowerShell 7+
