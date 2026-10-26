@@ -564,7 +564,7 @@ Describe 'keel.Mail' {
                 (Get-RecipientAddress $message.replyTo) | Should-Be 'reply@contoso.com'
             }
 
-            It 'omits Cc, Bcc, ReplyTo, and attachments when not provided' {
+            It 'omits Cc, Bcc, ReplyTo, attachments, and importance when not provided' {
                 InModuleScope keel.Mail {
                     Send-GraphEmail -SendUserId 's@contoso.com' -Subject 'Hi' -To 'a@contoso.com' -Body 'B' -GraphAccessToken 't'
                 }
@@ -574,6 +574,20 @@ Describe 'keel.Mail' {
                 $propertyNames -contains 'bccRecipients' | Should-BeFalse
                 $propertyNames -contains 'replyTo' | Should-BeFalse
                 $propertyNames -contains 'attachments' | Should-BeFalse
+                $propertyNames -contains 'importance' | Should-BeFalse
+            }
+
+            It 'sets importance to "<Expected>" when Priority is "<Priority>"' -ForEach @(
+                @{ Priority = 'High';   Expected = 'high'   }
+                @{ Priority = 'Low';    Expected = 'low'    }
+                @{ Priority = 'Normal'; Expected = 'normal' }
+            ) {
+                InModuleScope keel.Mail -Parameters @{ P = $Priority } {
+                    param($P)
+                    Send-GraphEmail -SendUserId 's@contoso.com' -Subject 'Hi' -To 'a@contoso.com' -Body 'B' -GraphAccessToken 't' -Priority $P
+                }
+
+                (Get-LastPayload).message.importance | Should-Be $Expected
             }
 
             It 'attaches a file as a base64 fileAttachment' {
@@ -945,8 +959,38 @@ Describe 'keel.Mail' {
                 -not $PesterBoundParameters.ContainsKey('Bcc') -and
                 -not $PesterBoundParameters.ContainsKey('ReplyTo') -and
                 -not $PesterBoundParameters.ContainsKey('Attachments') -and
-                -not $PesterBoundParameters.ContainsKey('BodyAsHtml')
+                -not $PesterBoundParameters.ContainsKey('BodyAsHtml') -and
+                -not $PesterBoundParameters.ContainsKey('Port') -and
+                -not $PesterBoundParameters.ContainsKey('UseSsl') -and
+                -not $PesterBoundParameters.ContainsKey('Priority')
             }
+        }
+
+        It 'passes Port when specified' {
+            InModuleScope keel.Mail {
+                Send-SmtpEmail -SmtpServer 'smtp.contoso.com' -Subject 'Hi' -To 'a@contoso.com' -From 'f@contoso.com' -Body 'B' -Port 587
+            }
+
+            Should-Invoke Send-MailMessage -ModuleName keel.Mail -Times 1 -Exactly -ParameterFilter { $Port -eq 587 }
+        }
+
+        It 'passes UseSsl when specified' {
+            InModuleScope keel.Mail {
+                Send-SmtpEmail -SmtpServer 'smtp.contoso.com' -Subject 'Hi' -To 'a@contoso.com' -From 'f@contoso.com' -Body 'B' -UseSsl
+            }
+
+            Should-Invoke Send-MailMessage -ModuleName keel.Mail -Times 1 -Exactly -ParameterFilter { $UseSsl -eq $true }
+        }
+
+        It 'passes Priority "<Value>" to Send-MailMessage' -ForEach @(
+            @{ Value = 'High' }, @{ Value = 'Low' }, @{ Value = 'Normal' }
+        ) {
+            InModuleScope keel.Mail -Parameters @{ P = $Value } {
+                param($P)
+                Send-SmtpEmail -SmtpServer 'smtp.contoso.com' -Subject 'Hi' -To 'a@contoso.com' -From 'f@contoso.com' -Body 'B' -Priority $P
+            }
+
+            Should-Invoke Send-MailMessage -ModuleName keel.Mail -Times 1 -Exactly -ParameterFilter { $Priority -eq $Value }
         }
 
         It 'passes Cc, Bcc, BodyAsHtml, and the resolved attachment path' {
@@ -1090,6 +1134,28 @@ Describe 'keel.Mail' {
 
                 Should-Invoke Send-SmtpEmail -ModuleName keel.Mail -Times 1 -Exactly -ParameterFilter { $BodyAsHtml -eq $true }
             }
+
+            It 'passes Port, UseSsl, and Priority through to Send-SmtpEmail' {
+                InModuleScope keel.Mail -Parameters @{ A = $DeliveryArgs } {
+                    param($A)
+                    Invoke-Delivery -DeliveryMethod Smtp -SmtpServer 'smtp.contoso.com' -Port 587 -UseSsl -Priority 'High' @A
+                }
+
+                Should-Invoke Send-SmtpEmail -ModuleName keel.Mail -Times 1 -Exactly -ParameterFilter {
+                    $Port -eq 587 -and [bool]$UseSsl -and $Priority -eq 'High'
+                }
+            }
+
+            It 'does not pass Port to Send-SmtpEmail when not specified' {
+                InModuleScope keel.Mail -Parameters @{ A = $DeliveryArgs } {
+                    param($A)
+                    Invoke-Delivery -DeliveryMethod Smtp -SmtpServer 'smtp.contoso.com' @A
+                }
+
+                Should-Invoke Send-SmtpEmail -ModuleName keel.Mail -Times 1 -Exactly -ParameterFilter {
+                    -not $PesterBoundParameters.ContainsKey('Port')
+                }
+            }
         }
 
         Context 'Graph delivery' {
@@ -1150,6 +1216,20 @@ Describe 'keel.Mail' {
 
                 Should-Invoke Send-SmtpEmail -ModuleName keel.Mail -Times 1 -Exactly -ParameterFilter { $SmtpServer -eq 'smtp.contoso.com' }
                 Should-Invoke Write-Warning -ModuleName keel.Mail -Times 1 -Exactly -ParameterFilter { $Message -like '*graph down*' }
+            }
+
+            It 'preserves Port, UseSsl, and Priority through the SMTP fallback' {
+                Mock Send-GraphEmail -ModuleName keel.Mail { throw 'graph down' }
+
+                InModuleScope keel.Mail -Parameters @{ A = $DeliveryArgs } {
+                    param($A)
+                    Invoke-Delivery -DeliveryMethod Graph -SmtpServer 'smtp.contoso.com' `
+                        -AllowSmtpFallback -Port 587 -UseSsl -Priority 'High' @A
+                }
+
+                Should-Invoke Send-SmtpEmail -ModuleName keel.Mail -Times 1 -Exactly -ParameterFilter {
+                    $Port -eq 587 -and [bool]$UseSsl -and $Priority -eq 'High'
+                }
             }
 
             It 'does not fall back to SMTP when Graph may already have delivered the message' {
@@ -1213,6 +1293,22 @@ Describe 'keel.Mail' {
 
             It 'supports -WhatIf' {
                 Get-Command Send-Email | Should-HaveParameter WhatIf
+            }
+
+            It 'exposes UseSsl as a switch' {
+                Get-Command Send-Email | Should-HaveParameter UseSsl -Type switch
+            }
+
+            It 'exposes Port as an int' {
+                Get-Command Send-Email | Should-HaveParameter Port -Type int
+            }
+
+            It 'validates Priority against Normal, High, Low' {
+                { Send-Email @BaseMail -Priority 'Urgent' } | Should-Throw
+            }
+
+            It 'rejects an out-of-range Port' {
+                { Send-Email @BaseMail -Port 0 } | Should-Throw
             }
         }
 
@@ -1283,6 +1379,14 @@ Describe 'keel.Mail' {
                 Send-Email @BaseMail -SmtpServer 'smtp.contoso.com' -AllowSmtpFallback
 
                 Should-Invoke Invoke-Delivery -ModuleName keel.Mail -Times 1 -Exactly -ParameterFilter { [bool]$AllowSmtpFallback }
+            }
+
+            It 'passes -Port, -UseSsl, and -Priority through to Invoke-Delivery' {
+                Send-Email @BaseMail -Port 587 -UseSsl -Priority High
+
+                Should-Invoke Invoke-Delivery -ModuleName keel.Mail -Times 1 -Exactly -ParameterFilter {
+                    $Port -eq 587 -and [bool]$UseSsl -and $Priority -eq 'High'
+                }
             }
 
             It 'does not deliver under -WhatIf, even with Cc recipients' {

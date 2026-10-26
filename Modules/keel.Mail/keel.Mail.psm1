@@ -547,6 +547,9 @@ function Send-GraphEmail {
     .PARAMETER GraphAccessToken
     Optional OAuth access token for Graph authentication.
 
+    .PARAMETER Priority
+    The message importance: Normal, High, or Low. Maps to the Graph importance field.
+
     .EXAMPLE
     Send-GraphEmail -SendUserId 'user@contoso.com' -Subject 'Alert' -To 'admin@contoso.com' -Body 'Test message'
     #>
@@ -574,7 +577,9 @@ function Send-GraphEmail {
 
         [switch]$BodyAsHtml,
 
-        [string]$GraphAccessToken
+        [string]$GraphAccessToken,
+
+        [string]$Priority
     )
 
     # Resolve and size-check attachments before building the message so an
@@ -620,6 +625,10 @@ function Send-GraphEmail {
     $replyToRecipients = @(Convert-ToGraphRecipient -AddressList $ReplyTo)
     if ($replyToRecipients.Count -gt 0) {
         $message['replyTo'] = $replyToRecipients
+    }
+
+    if (-not [string]::IsNullOrEmpty($Priority)) {
+        $message['importance'] = $Priority.ToLower()
     }
 
     if ($attachmentFiles.Count -gt 0) {
@@ -752,6 +761,15 @@ function Send-SmtpEmail {
     .PARAMETER BodyAsHtml
     Indicates whether the body should be treated as HTML.
 
+    .PARAMETER Port
+    The TCP port on the SMTP server. When not specified, Send-MailMessage uses its own default (25).
+
+    .PARAMETER UseSsl
+    Use SSL/TLS when connecting to the SMTP server.
+
+    .PARAMETER Priority
+    The message priority: Normal, High, or Low.
+
     .EXAMPLE
     Send-SmtpEmail -SmtpServer 'smtp.contoso.com' -Subject 'Alert' -To 'admin@contoso.com' -From 'alerts@contoso.com' -Body 'Test message'
     #>
@@ -780,7 +798,13 @@ function Send-SmtpEmail {
 
         [string[]]$AttachmentPath,
 
-        [switch]$BodyAsHtml
+        [switch]$BodyAsHtml,
+
+        [int]$Port,
+
+        [switch]$UseSsl,
+
+        [string]$Priority
     )
 
     $mailParams = @{
@@ -815,6 +839,18 @@ function Send-SmtpEmail {
                 "Sending without Reply-To ($($ReplyTo -join ', ')). Use Graph delivery or PowerShell 7 to keep it."
             )
         }
+    }
+
+    if ($PSBoundParameters.ContainsKey('Port')) {
+        $mailParams['Port'] = $Port
+    }
+
+    if ($UseSsl) {
+        $mailParams['UseSsl'] = $true
+    }
+
+    if (-not [string]::IsNullOrEmpty($Priority)) {
+        $mailParams['Priority'] = $Priority
     }
 
     $attachments = @(
@@ -882,6 +918,15 @@ function Invoke-Delivery {
     the message was not sent. When Graph may have accepted the message, the
     error is rethrown instead, to avoid a duplicate.
 
+    .PARAMETER Port
+    The TCP port for SMTP delivery.
+
+    .PARAMETER UseSsl
+    Use SSL/TLS for SMTP delivery.
+
+    .PARAMETER Priority
+    The message importance: Normal, High, or Low.
+
     .EXAMPLE
     Invoke-Delivery -DeliveryMethod Graph -Subject 'Alert' -To 'admin@contoso.com' -From 'alerts@contoso.com' -Body 'Test message.' -AllowSmtpFallback
     #>
@@ -919,7 +964,13 @@ function Invoke-Delivery {
 
         [string]$GraphAccessToken,
 
-        [switch]$AllowSmtpFallback
+        [switch]$AllowSmtpFallback,
+
+        [int]$Port,
+
+        [switch]$UseSsl,
+
+        [string]$Priority
     )
 
     $smtpSendParams = @{
@@ -933,7 +984,10 @@ function Invoke-Delivery {
         Body           = $Body
         AttachmentPath = $AttachmentPath
         BodyAsHtml     = $BodyAsHtml
+        UseSsl         = $UseSsl
     }
+    if ($PSBoundParameters.ContainsKey('Port')) { $smtpSendParams['Port'] = $Port }
+    if (-not [string]::IsNullOrEmpty($Priority)) { $smtpSendParams['Priority'] = $Priority }
 
     Write-Debug "Invoke-Delivery: DeliveryMethod=$DeliveryMethod, Recipients=$($To.Count)"
 
@@ -960,6 +1014,7 @@ function Invoke-Delivery {
                 BodyAsHtml       = $BodyAsHtml
                 GraphAccessToken = $GraphAccessToken
             }
+            if (-not [string]::IsNullOrEmpty($Priority)) { $graphSendParams['Priority'] = $Priority }
 
             Send-GraphEmail @graphSendParams
         }
@@ -1058,6 +1113,19 @@ function Send-Email {
     found before sending, such as an oversized attachment. When Graph may have
     accepted the message, such as after a 500, 502, or 504 or a timeout, no
     fallback is attempted and the error is rethrown.
+
+    .PARAMETER Port
+    The TCP port to use for SMTP delivery. Defaults to the Send-MailMessage
+    default (25) when not specified. Has no effect on the Graph delivery leg;
+    when AllowSmtpFallback is set, applies to the SMTP fallback.
+
+    .PARAMETER UseSsl
+    Use SSL/TLS when connecting to the SMTP server. Has no effect on the Graph
+    delivery leg; when AllowSmtpFallback is set, applies to the SMTP fallback.
+
+    .PARAMETER Priority
+    The message importance: Normal, High, or Low. Applies to both Graph and
+    SMTP delivery.
 
     .NOTES
     Supported environment variables:
@@ -1158,7 +1226,15 @@ function Send-Email {
 
         [string]$GraphAccessToken,
 
-        [switch]$AllowSmtpFallback
+        [switch]$AllowSmtpFallback,
+
+        [ValidateRange(1, 65535)]
+        [int]$Port,
+
+        [switch]$UseSsl,
+
+        [ValidateSet('Normal', 'High', 'Low')]
+        [string]$Priority
     )
 
     if ([string]::IsNullOrWhiteSpace($Subject)) {
@@ -1316,21 +1392,24 @@ function Send-Email {
 
     if ($PSCmdlet.ShouldProcess($targetRecipientsList, $actionDescription)) {
         $deliveryParams = @{
-            DeliveryMethod = $DeliveryMethod
-            SmtpServer = $SmtpServer
-            Subject = $Subject
-            To = $normalizedTo
-            Cc = $normalizedCc
-            Bcc = $normalizedBcc
-            ReplyTo = $normalizedReplyTo
-            From = $normalizedFrom
-            Body = $Body
-            AttachmentPath = $AttachmentPath
-            BodyAsHtml = $BodyAsHtml
+            DeliveryMethod    = $DeliveryMethod
+            SmtpServer        = $SmtpServer
+            Subject           = $Subject
+            To                = $normalizedTo
+            Cc                = $normalizedCc
+            Bcc               = $normalizedBcc
+            ReplyTo           = $normalizedReplyTo
+            From              = $normalizedFrom
+            Body              = $Body
+            AttachmentPath    = $AttachmentPath
+            BodyAsHtml        = $BodyAsHtml
+            UseSsl            = $UseSsl
             GraphSenderUserId = $resolvedGraphSender
-            GraphAccessToken = $GraphAccessToken
+            GraphAccessToken  = $GraphAccessToken
             AllowSmtpFallback = $AllowSmtpFallback
         }
+        if ($PSBoundParameters.ContainsKey('Port')) { $deliveryParams['Port'] = $Port }
+        if (-not [string]::IsNullOrEmpty($Priority)) { $deliveryParams['Priority'] = $Priority }
 
         Invoke-Delivery @deliveryParams
     }
