@@ -1116,11 +1116,12 @@ function Send-Email {
 
     .PARAMETER Port
     The TCP port to use for SMTP delivery. Defaults to the Send-MailMessage
-    default (25) when not specified. Has no effect on Graph delivery.
+    default (25) when not specified. Has no effect on the Graph delivery leg;
+    when AllowSmtpFallback is set, applies to the SMTP fallback.
 
     .PARAMETER UseSsl
-    Use SSL/TLS when connecting to the SMTP server. Has no effect on Graph
-    delivery.
+    Use SSL/TLS when connecting to the SMTP server. Has no effect on the Graph
+    delivery leg; when AllowSmtpFallback is set, applies to the SMTP fallback.
 
     .PARAMETER Priority
     The message importance: Normal, High, or Low. Applies to both Graph and

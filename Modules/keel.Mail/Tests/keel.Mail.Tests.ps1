@@ -1145,6 +1145,17 @@ Describe 'keel.Mail' {
                     $Port -eq 587 -and [bool]$UseSsl -and $Priority -eq 'High'
                 }
             }
+
+            It 'does not pass Port to Send-SmtpEmail when not specified' {
+                InModuleScope keel.Mail -Parameters @{ A = $DeliveryArgs } {
+                    param($A)
+                    Invoke-Delivery -DeliveryMethod Smtp -SmtpServer 'smtp.contoso.com' @A
+                }
+
+                Should-Invoke Send-SmtpEmail -ModuleName keel.Mail -Times 1 -Exactly -ParameterFilter {
+                    -not $PesterBoundParameters.ContainsKey('Port')
+                }
+            }
         }
 
         Context 'Graph delivery' {

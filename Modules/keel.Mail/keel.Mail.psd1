@@ -1,6 +1,6 @@
 @{
     RootModule = 'keel.Mail.psm1'
-    ModuleVersion = '1.0.0'
+    ModuleVersion = '1.1.0'
     GUID = '9df7bcd4-121b-4ad4-8ebd-72433f326489'
     Author = 'jackson-asmith'
     Copyright = '(c) 2026 jackson-asmith. Licensed under the MIT License.'
