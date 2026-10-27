@@ -1,6 +1,6 @@
 @{
     RootModule        = 'keel.Http.psm1'
-    ModuleVersion     = '1.0.0'
+    ModuleVersion     = '1.1.0'
     GUID              = '1fe23d06-6add-4c6f-8835-95e72d026c2a'
     Author            = 'jackson-asmith'
     Copyright         = '(c) 2026 jackson-asmith. Licensed under the MIT License.'
