@@ -233,6 +233,18 @@ Errors and warnings fail the build. To accept a specific finding, suppress it ne
 
 A weekly scheduled run also runs the integration tests against the latest Graph SDK, so SDK behavior changes show up before you upgrade.
 
+## Versioning
+
+keel uses [semantic versioning](https://semver.org), and both modules share one version. A release tagged `vX.Y.Z` ships keel.Mail and keel.Http with `ModuleVersion = 'X.Y.Z'` in both manifests, even if only one module changed. The lint task checks this on every pull request and fails if the manifests' versions differ.
+
+- **Patch** (`1.1.0` to `1.1.1`): bug fixes.
+- **Minor** (`1.1.0` to `1.2.0`): new features that don't break existing callers.
+- **Major** (`1.1.0` to `2.0.0`): changes that can break existing callers, such as a renamed or removed parameter.
+
+To release, bump `ModuleVersion` in both manifests in the pull request that changes the modules. After it merges and CI passes on `main`, tag that commit `vX.Y.Z` and publish a GitHub release from the tag. Changes that don't touch the modules, such as CI, tests, or documentation, don't need a release.
+
+The `v1.1.0` release was tagged before this rule was adopted, so it ships keel.Http with `ModuleVersion = '1.0.0'`. keel.Http's code is the same in both versions.
+
 ## License
 
 [MIT](LICENSE) © 2026 jackson-asmith
