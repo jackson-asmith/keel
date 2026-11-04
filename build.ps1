@@ -156,7 +156,8 @@ function Invoke-LintTask {
     Write-Host "PSScriptAnalyzer: $($files.Count) files, $($blocking.Count) blocking finding(s), $informational informational."
 
     $manifestFailures = 0
-    foreach ($manifest in Get-ChildItem -Path $ModulesRoot -Filter '*.psd1' -Recurse | Where-Object { $_.FullName -notmatch '[\\/]Tests[\\/]' }) {
+    $manifests = @(Get-ChildItem -Path $ModulesRoot -Filter '*.psd1' -Recurse | Where-Object { $_.FullName -notmatch '[\\/]Tests[\\/]' })
+    foreach ($manifest in $manifests) {
         try {
             $null = Test-ModuleManifest -Path $manifest.FullName -ErrorAction Stop
             Write-Host "Test-ModuleManifest: $($manifest.Name) OK"
@@ -169,6 +170,30 @@ function Invoke-LintTask {
                 Write-Host "::error file=$relativePath,title=Test-ModuleManifest::$(ConvertTo-AnnotationText $_.Exception.Message)"
             }
         }
+    }
+
+    # Both modules share one version (see Versioning in the README).
+    $versions = foreach ($manifest in $manifests) {
+        [pscustomobject]@{
+            Manifest = $manifest
+            Version  = "$((Import-PowerShellDataFile -Path $manifest.FullName).ModuleVersion)"
+        }
+    }
+    $distinctVersions = @($versions | Select-Object -ExpandProperty Version -Unique)
+    if ($distinctVersions.Count -gt 1) {
+        $summary = ($versions | ForEach-Object { "$($_.Manifest.Name) $($_.Version)" }) -join ', '
+        $message = "Module versions must match (see Versioning in the README): $summary."
+        Write-Host "Version check: $message"
+        foreach ($entry in $versions) {
+            $manifestFailures++
+            if ($InGitHubActions) {
+                $line = (Select-String -Path $entry.Manifest.FullName -Pattern '^\s*ModuleVersion\b' | Select-Object -First 1).LineNumber
+                Write-Host "::error file=$(Get-RepoRelativePath $entry.Manifest.FullName),line=$line,title=Module versions differ::$(ConvertTo-AnnotationText $message)"
+            }
+        }
+    }
+    else {
+        Write-Host "Version check: all modules at $($distinctVersions[0])"
     }
 
     if ($blocking.Count -gt 0 -or $manifestFailures -gt 0) {

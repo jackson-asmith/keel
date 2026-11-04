@@ -235,7 +235,7 @@ A weekly scheduled run also runs the integration tests against the latest Graph 
 
 ## Versioning
 
-keel uses [semantic versioning](https://semver.org), and both modules share one version. A release tagged `vX.Y.Z` ships keel.Mail and keel.Http with `ModuleVersion = 'X.Y.Z'` in both manifests, even if only one module changed.
+keel uses [semantic versioning](https://semver.org), and both modules share one version. A release tagged `vX.Y.Z` ships keel.Mail and keel.Http with `ModuleVersion = 'X.Y.Z'` in both manifests, even if only one module changed. The lint task checks this on every pull request and fails if the manifests' versions differ.
 
 - **Patch** (`1.1.0` to `1.1.1`): bug fixes.
 - **Minor** (`1.1.0` to `1.2.0`): new features that don't break existing callers.
