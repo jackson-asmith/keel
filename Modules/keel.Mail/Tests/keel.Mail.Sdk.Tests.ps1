@@ -12,7 +12,8 @@ They are skipped when the SDK isn't installed or the stub can't listen on
 port 80. Port 80 is required: Invoke-MgGraphRequest resolves relative URIs from
 the endpoint's scheme and host only, dropping any custom port. macOS allows
 unprivileged processes to bind port 80 on all interfaces; Linux and Windows
-usually need elevation.
+usually need elevation. CI runs them on macOS with PowerShell 7 and on
+Windows PowerShell 5.1, where GitHub's runners run as administrator.
 
 Run just these with:
     Invoke-Pester ./Modules -TagFilter Integration -Output Detailed
@@ -74,7 +75,10 @@ Describe 'keel.Mail through the Microsoft Graph SDK' -Tag Integration -Skip:([bo
                 param($Listener, $Stub)
                 while ($Listener.IsListening) {
                     try { $context = $Listener.GetContext() } catch { break }
-                    [void]$Stub.Requests.Add("$($context.Request.HttpMethod) $($context.Request.Url.AbsolutePath)")
+                    # Log the decoded path: .NET Framework's Uri turns %40 back into @,
+                    # so the raw path differs between Windows PowerShell and PowerShell 7.
+                    $path = [System.Uri]::UnescapeDataString($context.Request.Url.AbsolutePath)
+                    [void]$Stub.Requests.Add("$($context.Request.HttpMethod) $path")
                     $status = 0
                     if (-not $Stub.Responses.TryDequeue([ref]$status)) { $status = $Stub.DefaultStatus }
                     $context.Response.StatusCode = $status
@@ -126,7 +130,7 @@ Describe 'keel.Mail through the Microsoft Graph SDK' -Tag Integration -Skip:([bo
             Body        = 'See attached log.'
             WarningAction = 'SilentlyContinue'
         }
-        $script:SendMailRequest = 'POST /v1.0/users/automation%40contoso.com/sendMail'
+        $script:SendMailRequest = 'POST /v1.0/users/automation@contoso.com/sendMail'
     }
 
     AfterAll {

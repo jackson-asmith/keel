@@ -17,7 +17,7 @@ For a few scripts, you should: `Connect-MgGraph` plus `Send-MgUserMail` is a han
 
 ## Requirements
 
-- Windows PowerShell 5.1 or PowerShell 7+
+- Windows PowerShell 5.1, or PowerShell 7.4 or later. CI tests 5.1 and the current PowerShell 7 release; versions before 7.4 aren't tested.
 - For Graph delivery, one of:
   - An OAuth access token for Microsoft Graph, or
   - The [Microsoft Graph PowerShell SDK](https://learn.microsoft.com/powershell/microsoftgraph/installation) (`Microsoft.Graph.Authentication`) with an existing session or app-only credentials
@@ -229,7 +229,7 @@ Errors and warnings fail the build. To accept a specific finding, suppress it ne
 |---|---|
 | Lint | Ubuntu, PowerShell 7 |
 | Test | Ubuntu, macOS, and Windows on PowerShell 7, plus Windows PowerShell 5.1 |
-| Integration | macOS, with the pinned Graph SDK version |
+| Integration | macOS on PowerShell 7, and Windows PowerShell 5.1, each with the pinned Graph SDK version |
 
 A weekly scheduled run also runs the integration tests against the latest Graph SDK, so SDK behavior changes show up before you upgrade.
 
