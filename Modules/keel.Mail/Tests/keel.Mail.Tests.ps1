@@ -772,6 +772,12 @@ Describe 'keel.Mail' {
                 Mock Set-MgRequestContext -ModuleName keel.Mail { }
             }
 
+            AfterEach {
+                # Every path, including failures, must release the process-wide lock,
+                # or the next send in this process would wait for it and time out.
+                InModuleScope keel.Mail { (Get-GraphSdkContextLock).CurrentCount } | Should-Be 1
+            }
+
             It 'turns off SDK retries for the send and restores the caller settings afterward' {
                 Mock Get-MgContext -ModuleName keel.Mail { [pscustomobject]@{ TenantId = 'tenant-id' } }
                 Mock Get-MgRequestContext -ModuleName keel.Mail {
@@ -855,6 +861,43 @@ Describe 'keel.Mail' {
 
                 Should-NotInvoke Invoke-MgGraphRequest -ModuleName keel.Mail
                 Should-Invoke Send-SmtpEmail -ModuleName keel.Mail -Times 1 -Exactly
+            }
+
+            It 'does not send, and allows fallback, when another send holds the lock too long' {
+                Mock Get-MgContext -ModuleName keel.Mail { [pscustomobject]@{ TenantId = 'tenant-id' } }
+                $lock = InModuleScope keel.Mail { Get-GraphSdkContextLock }
+                $savedTimeout = InModuleScope keel.Mail { $script:GraphSdkContextLockTimeout }
+                [void]$lock.Wait()
+                $thrown = $null
+                try {
+                    InModuleScope keel.Mail { $script:GraphSdkContextLockTimeout = [TimeSpan]::FromMilliseconds(100) }
+                    InModuleScope keel.Mail {
+                        Send-GraphEmail -SendUserId 's@contoso.com' -Subject 'Hi' -To 'a@contoso.com' -Body 'B'
+                    }
+                }
+                catch {
+                    $thrown = $_
+                }
+                finally {
+                    [void]$lock.Release()
+                    InModuleScope keel.Mail -Parameters @{ Timeout = $savedTimeout } {
+                        param($Timeout)
+                        $script:GraphSdkContextLockTimeout = $Timeout
+                    }
+                }
+
+                $thrown.Exception.Message | Should-BeLikeString 'Another send in this process held the Graph SDK request context*'
+                $thrown.Exception.Data['KeelDeliveryState'] | Should-Be 'NotSent'
+                Should-NotInvoke Get-MgRequestContext -ModuleName keel.Mail
+                Should-NotInvoke Invoke-MgGraphRequest -ModuleName keel.Mail
+            }
+
+            It 'shares one lock across the process' {
+                $first = InModuleScope keel.Mail { Get-GraphSdkContextLock }
+                $second = InModuleScope keel.Mail { Get-GraphSdkContextLock }
+
+                [object]::ReferenceEquals($first, $second) | Should-BeTrue
+                [object]::ReferenceEquals($first, [AppDomain]::CurrentDomain.GetData('keel.Mail.GraphSdkRequestContextLock')) | Should-BeTrue
             }
 
             It 'does not send when the SDK request context cannot be read' {

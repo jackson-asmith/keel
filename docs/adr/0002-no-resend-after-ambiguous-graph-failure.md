@@ -56,5 +56,6 @@ Sending through the direct REST path in both modes was rejected: the SDK has no 
 
 ### Consequences
 
-- The SDK's request context is process-wide. While a `sendMail` request is in flight, other Graph calls running in parallel in the same process also run without SDK retries.
+- The SDK's request context is process-wide, shared by every runspace. Without coordination, two overlapping sends can undo each other: one restores SDK retries while the other's request is going out, which lets the SDK resend it, and the last to finish restores the other's `MaxRetry` of 0. So sends take a process-wide lock, stored in AppDomain data because module variables aren't shared between runspaces, around saving, changing, and restoring the settings. Sends in the same process therefore run one at a time through the SDK. A send that waits more than 5 minutes for the lock fails as `NotSent`.
+- While a `sendMail` request is in flight, other Graph calls running in parallel in the same process also run without SDK retries.
 - `keel.Mail.Sdk.Tests.ps1` runs the real SDK against a local stub to guard this. It needs `Microsoft.Graph.Authentication` and permission to listen on port 80, because `Invoke-MgGraphRequest` drops custom ports from relative URIs. It skips itself when either is missing.

@@ -41,6 +41,14 @@ $script:NotSentSocketErrors = @(
     'HostNotFound', 'NoData', 'TryAgain', 'ConnectionRefused', 'NetworkUnreachable', 'HostUnreachable'
 )
 
+# The Graph SDK's retry settings are shared by every runspace in the process, but
+# module variables are not, so the lock that serializes changes to them lives in
+# AppDomain data under this name. Every copy of keel.Mail in the process uses it.
+$script:GraphSdkContextLockName = 'keel.Mail.GraphSdkRequestContextLock'
+
+# How long a send waits for another send in the same process to release the lock.
+$script:GraphSdkContextLockTimeout = [TimeSpan]::FromMinutes(5)
+
 
 function Convert-ToGraphRecipient {
     <#
@@ -428,6 +436,40 @@ function Test-GraphSendRefused {
     $false
 }
 
+function Get-GraphSdkContextLock {
+    <#
+    .SYNOPSIS
+    Returns the process-wide lock that serializes changes to the Graph SDK's retry settings.
+
+    .DESCRIPTION
+    Creates the lock on first use and stores it in AppDomain data, so every
+    runspace in the process, and every copy of keel.Mail loaded in them, gets
+    the same SemaphoreSlim.
+    #>
+    [CmdletBinding()]
+    [OutputType([System.Threading.SemaphoreSlim])]
+    param()
+
+    $domain = [AppDomain]::CurrentDomain
+    $lock = $domain.GetData($script:GraphSdkContextLockName)
+    if ($null -eq $lock) {
+        # Two runspaces can get here at once. Holding a monitor on the AppDomain
+        # while checking again makes sure only one SemaphoreSlim is ever stored.
+        [System.Threading.Monitor]::Enter($domain)
+        try {
+            $lock = $domain.GetData($script:GraphSdkContextLockName)
+            if ($null -eq $lock) {
+                $lock = [System.Threading.SemaphoreSlim]::new(1, 1)
+                $domain.SetData($script:GraphSdkContextLockName, $lock)
+            }
+        }
+        finally {
+            [System.Threading.Monitor]::Exit($domain)
+        }
+    }
+    $lock
+}
+
 function Invoke-GraphRequestWithoutSdkRetry {
     <#
     .SYNOPSIS
@@ -444,9 +486,11 @@ function Invoke-GraphRequestWithoutSdkRetry {
     restores the caller's settings, so Invoke-WithBoundedRetry is the only
     thing that decides what to retry.
 
-    The SDK's request context is process-wide. While the request is in flight,
-    other Graph calls running in parallel in the same process also run without
-    SDK retries.
+    The SDK's request context is process-wide. Sends in the same process take a
+    shared lock around saving, changing, and restoring it, so one send can't
+    restore SDK retries while another send's request is going out. Other Graph
+    calls running in parallel in the same process still run without SDK retries
+    while a request is in flight.
 
     .PARAMETER Parameters
     The parameters to splat into Invoke-MgGraphRequest.
@@ -459,7 +503,19 @@ function Invoke-GraphRequestWithoutSdkRetry {
 
     # Nothing has been sent yet. Mark any failure here as NotSent so the caller
     # knows it is safe to fall back to SMTP.
+    $lock = $null
     try {
+        # Wait in short steps: PowerShell can only stop the script (Ctrl+C,
+        # Stop-Job) between statements, not inside a long blocking wait.
+        $candidate = Get-GraphSdkContextLock
+        $deadline = [DateTime]::UtcNow + $script:GraphSdkContextLockTimeout
+        while (-not $candidate.Wait(250)) {
+            if ([DateTime]::UtcNow -ge $deadline) {
+                throw "Another send in this process held the Graph SDK request context for more than $($script:GraphSdkContextLockTimeout.TotalMinutes) minutes. The message was not sent."
+            }
+        }
+        $lock = $candidate
+
         $saved = Get-MgRequestContext
         if ($null -eq $saved) {
             throw 'Could not read the Graph SDK request context, so SDK retries could not be disabled. The message was not sent.'
@@ -477,6 +533,7 @@ function Invoke-GraphRequestWithoutSdkRetry {
         Set-MgRequestContext -MaxRetry 0 | Out-Null
     }
     catch {
+        if ($lock) { [void]$lock.Release() }
         $_.Exception.Data['KeelDeliveryState'] = 'NotSent'
         throw
     }
@@ -496,6 +553,9 @@ function Invoke-GraphRequestWithoutSdkRetry {
                 "(MaxRetry $($restore.MaxRetry), RetryDelay $($restore.RetryDelay), RetriesTimeLimit $($restore.RetriesTimeLimit)): " +
                 $_.Exception.Message
             )
+        }
+        finally {
+            [void]$lock.Release()
         }
     }
 }
