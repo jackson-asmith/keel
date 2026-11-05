@@ -62,11 +62,14 @@ Describe 'keel.Mail through the Microsoft Graph SDK' -Tag Integration -Skip:([bo
         }
 
         # Stub Graph endpoint. Each request takes the next status from Responses,
-        # or DefaultStatus when the queue is empty, and is logged.
+        # or DefaultStatus when the queue is empty, and is logged. A request whose
+        # path matches HoldPattern goes unanswered in Held until a test answers it.
         $script:Stub = [hashtable]::Synchronized(@{
                 Requests      = [System.Collections.ArrayList]::Synchronized([System.Collections.ArrayList]::new())
                 Responses     = [System.Collections.Concurrent.ConcurrentQueue[int]]::new()
                 DefaultStatus = 202
+                HoldPattern   = $null
+                Held          = [System.Collections.Concurrent.ConcurrentQueue[object]]::new()
             })
         $script:Listener = [System.Net.HttpListener]::new()
         $Listener.Prefixes.Add($StubPrefix)
@@ -79,6 +82,10 @@ Describe 'keel.Mail through the Microsoft Graph SDK' -Tag Integration -Skip:([bo
                     # so the raw path differs between Windows PowerShell and PowerShell 7.
                     $path = [System.Uri]::UnescapeDataString($context.Request.Url.AbsolutePath)
                     [void]$Stub.Requests.Add("$($context.Request.HttpMethod) $path")
+                    if ($Stub.HoldPattern -and $path -like $Stub.HoldPattern) {
+                        $Stub.Held.Enqueue($context)
+                        continue
+                    }
                     $status = 0
                     if (-not $Stub.Responses.TryDequeue([ref]$status)) { $status = $Stub.DefaultStatus }
                     $context.Response.StatusCode = $status
@@ -91,12 +98,71 @@ Describe 'keel.Mail through the Microsoft Graph SDK' -Tag Integration -Skip:([bo
         function Set-StubResponse {
             # Queues specific statuses for the next requests, then answers every
             # later request with the default status.
-            param([int[]]$Next = @(), [int]$Default = 202)
+            # Requests whose path matches HoldPattern are held until Complete-HeldRequest.
+            param([int[]]$Next = @(), [int]$Default = 202, [string]$HoldPattern)
             $Stub.Requests.Clear()
             $ignored = 0
             while ($Stub.Responses.TryDequeue([ref]$ignored)) { }
             foreach ($status in $Next) { $Stub.Responses.Enqueue($status) }
             $Stub.DefaultStatus = $Default
+            Complete-HeldRequest -Status 503
+            $Stub.HoldPattern = $HoldPattern
+        }
+
+        function Complete-HeldRequest {
+            # Answers every request the stub is holding.
+            param([int]$Status = 202)
+            $context = $null
+            while ($Stub.Held.TryDequeue([ref]$context)) {
+                $context.Response.StatusCode = $Status
+                $context.Response.Close()
+            }
+        }
+
+        function Wait-Until {
+            param([scriptblock]$Condition, [int]$TimeoutSeconds = 30)
+            $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+            while (-not (& $Condition)) {
+                if ([DateTime]::UtcNow -gt $deadline) { throw "Timed out after $TimeoutSeconds seconds waiting for: $Condition" }
+                Start-Sleep -Milliseconds 20
+            }
+        }
+
+        function Start-SendInRunspace {
+            # Runs Send-Email in another runspace of this process, which shares the
+            # Graph SDK's session and request context with this one. With a Gate, it
+            # sets Gate.Ready once its modules are loaded, then the send pauses just
+            # before its request reaches Invoke-MgGraphRequest, after keel has adjusted
+            # the SDK's retry settings, and sets Gate.Reached until Gate.Proceed is set.
+            param([hashtable]$Mail, [hashtable]$Gate)
+            $runner = [powershell]::Create().AddScript({
+                    param($ModulesRoot, $Mail, $Gate)
+                    $ErrorActionPreference = 'Stop'
+                    Import-Module Microsoft.Graph.Authentication
+                    Import-Module (Join-Path $ModulesRoot 'keel.Http/keel.Http.psd1')
+                    Import-Module (Join-Path $ModulesRoot 'keel.Mail/keel.Mail.psd1')
+                    if ($Gate) {
+                        # A global function takes precedence over the SDK's cmdlet when
+                        # keel.Mail calls Invoke-MgGraphRequest.
+                        $pause = {
+                            $Gate.Reached.Set()
+                            [void]$Gate.Proceed.Wait(30000)
+                            Microsoft.Graph.Authentication\Invoke-MgGraphRequest @args
+                        }.GetNewClosure()
+                        Set-Item -Path Function:\global:Invoke-MgGraphRequest -Value $pause
+                        $Gate.Ready.Set()
+                    }
+                    try { Send-Email @Mail; 'Sent' }
+                    catch { $_.FullyQualifiedErrorId }
+                }).AddArgument($ModulesRoot).AddArgument($Mail).AddArgument($Gate)
+            @{ Runner = $runner; Handle = $runner.BeginInvoke() }
+        }
+
+        function Receive-SendInRunspace {
+            # Returns 'Sent' or the error ID Send-Email threw.
+            param([hashtable]$Send)
+            try { @($Send.Runner.EndInvoke($Send.Handle))[-1] }
+            finally { $Send.Runner.Dispose() }
         }
 
         function New-FakeAccessToken {
@@ -208,5 +274,46 @@ Describe 'keel.Mail through the Microsoft Graph SDK' -Tag Integration -Skip:([bo
         $after.MaxRetry | Should-Be 5
         $after.RetryDelay | Should-Be 2
         $after.RetriesTimeLimit | Should-Be ([TimeSpan]::FromSeconds(30))
+    }
+
+    It 'keeps SDK retries off for a send that overlaps another send in the same process' {
+        # The SDK's retry settings are shared by every runspace in the process. Hold
+        # the first send's request so it is in flight, start a second send, and
+        # pause it after keel turns SDK retries off but before its request starts.
+        # Then let the first send finish and restore the caller's settings before
+        # the second send's request goes out.
+        Set-StubResponse -Default 504 -HoldPattern '*/first@contoso.com/*'
+        $first = $Mail.Clone(); $first.From = 'first@contoso.com'
+        $second = $Mail.Clone(); $second.From = 'second@contoso.com'
+        $gate = @{
+            Ready   = [System.Threading.ManualResetEventSlim]::new($false)
+            Reached = [System.Threading.ManualResetEventSlim]::new($false)
+            Proceed = [System.Threading.ManualResetEventSlim]::new($false)
+        }
+        $sends = @()
+        try {
+            $sends += Start-SendInRunspace -Mail $first
+            Wait-Until { $Stub.Held.Count -eq 1 }
+
+            $sends += Start-SendInRunspace -Mail $second -Gate $gate
+            if (-not $gate.Ready.Wait(30000)) { throw 'The second send did not start.' }
+            # If keel makes the second send wait for the first, it doesn't reach the gate.
+            [void]$gate.Reached.Wait(2000)
+
+            Complete-HeldRequest -Status 202
+            $firstResult = Receive-SendInRunspace $sends[0]
+            $gate.Proceed.Set()
+            $secondResult = Receive-SendInRunspace $sends[1]
+        }
+        finally {
+            $gate.Proceed.Set()
+            Complete-HeldRequest -Status 503
+            foreach ($send in $sends) { if ($send.Runner.InvocationStateInfo.State -eq 'Running') { $send.Runner.Stop() } }
+        }
+
+        $firstResult | Should-Be 'Sent'
+        $secondResult | Should-BeLikeString 'GraphDeliveryUnknown*'
+        @($Stub.Requests | Where-Object { $_ -like '*/second@contoso.com/*' }).Count | Should-Be 1
+        (Get-MgRequestContext).MaxRetry | Should-Be 3
     }
 }
