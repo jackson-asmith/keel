@@ -52,7 +52,7 @@ Describe 'keel.Mail through the Microsoft Graph SDK' -Tag Integration -Skip:([bo
         Import-Module Microsoft.Graph.Authentication -ErrorAction Stop
         Get-Module keel.Mail, keel.Http | Remove-Module -Force
         Import-Module (Join-Path $ModulesRoot 'keel.Http/keel.Http.psd1') -Force -ErrorAction Stop
-        Import-Module (Join-Path $ModuleRoot 'keel.Mail.psm1') -Force -ErrorAction Stop
+        Import-Module (Join-Path $ModuleRoot 'keel.Mail.psd1') -Force -ErrorAction Stop
 
         # Keep the host's Keel configuration out of these tests.
         $script:SavedKeelEnv = @{}

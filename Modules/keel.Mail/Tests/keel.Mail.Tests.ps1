@@ -11,11 +11,12 @@ BeforeAll {
     $script:ModulesRoot = Split-Path -Parent $ModuleRoot
     $script:ManifestPath = Join-Path $ModuleRoot 'keel.Mail.psd1'
 
-    # keel.Mail calls Invoke-WithBoundedRetry from keel.Http. Import both by path so the
-    # behavioral tests don't depend on PSModulePath; the manifest tests cover RequiredModules.
+    # keel.Mail calls Invoke-WithBoundedRetry from keel.Http. Import keel.Http first so the
+    # manifest's RequiredModules resolves without PSModulePath. Load keel.Mail through its
+    # manifest, which owns the export list, so the tests see what users import.
     Get-Module keel.Mail, keel.Http | Remove-Module -Force
     Import-Module (Join-Path $ModulesRoot 'keel.Http/keel.Http.psd1') -Force -ErrorAction Stop
-    Import-Module (Join-Path $ModuleRoot 'keel.Mail.psm1') -Force -ErrorAction Stop
+    Import-Module (Join-Path $ModuleRoot 'keel.Mail.psd1') -Force -ErrorAction Stop
 
     # Pester can only mock commands that exist. When the Microsoft Graph SDK isn't installed,
     # define global stubs with the parameters keel.Mail uses, and remove them in AfterAll.

@@ -1414,5 +1414,3 @@ function Send-Email {
         Invoke-Delivery @deliveryParams
     }
 }
-
-Export-ModuleMember -Function Send-Email

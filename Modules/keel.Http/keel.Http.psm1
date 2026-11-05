@@ -351,5 +351,3 @@ function Invoke-WithBoundedRetry {
         return
     }
 }
-
-Export-ModuleMember -Function Get-RetryableStatusCode, Invoke-WithBoundedRetry
