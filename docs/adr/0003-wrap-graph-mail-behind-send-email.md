@@ -40,3 +40,24 @@ Repeated across many scripts, each of these would be written slightly differentl
 - Scripts depend on `Send-Email`'s parameters, not on Graph SDK commands, so SDK changes are absorbed inside keel.
 - Callers can use only what `Send-Email` exposes. Graph features it doesn't offer, such as message importance or saving to Sent Items, need a change to keel or a direct Graph call.
 - Not every script needs keel. When only a few scripts send mail, or a script already uses the Graph SDK for other work, calling `Send-MgUserMail` directly is simpler.
+
+## Amendment: the command name (2026-11-23)
+
+### Context
+
+The original decision named the command `Send-Email` without saying why it has no module prefix. PowerShell modules often prefix their nouns, as in `Send-KeelMail`, so their commands can't collide with another module's. A generic name like `Send-Email` can: if a script loads another module, or defines a function, with the same name, whichever was loaded last is the one an unqualified `Send-Email` calls.
+
+### Decision
+
+**The command stays `Send-Email`, unprefixed.**
+
+- It matches `Send-MailMessage`, the cmdlet it replaces, so a script migrates by swapping the command name and keeping its parameters.
+- A script that does hit a collision can call `keel.Mail\Send-Email`, which always resolves to keel's command whatever else is loaded.
+- keel 1.0 shipped with this name, so renaming it now would break every caller.
+
+The prefixed alternative, `Send-KeelMail`, avoids collisions without the module-qualified form, but every migrated script would carry a keel-specific name, and existing scripts would need a breaking rename.
+
+### Consequences
+
+- Scripts that load several modules with mail commands should call `keel.Mail\Send-Email`, so a later import can't change which command runs.
+- A future rename would be a breaking change, which means a new major version with the old name kept as an alias.
