@@ -59,3 +59,27 @@ Sending through the direct REST path in both modes was rejected: the SDK has no 
 - The SDK's request context is process-wide, shared by every runspace. Without coordination, two overlapping sends can undo each other: one restores SDK retries while the other's request is going out, which lets the SDK resend it, and the last to finish restores the other's `MaxRetry` of 0. So sends take a process-wide lock, stored in AppDomain data because module variables aren't shared between runspaces, around saving, changing, and restoring the settings. Sends in the same process therefore run one at a time through the SDK. A send that waits more than 5 minutes for the lock fails as `NotSent`.
 - While a `sendMail` request is in flight, other Graph calls running in parallel in the same process also run without SDK retries.
 - `keel.Mail.Sdk.Tests.ps1` runs the real SDK against a local stub to guard this. It needs `Microsoft.Graph.Authentication` and permission to listen on port 80, because `Invoke-MgGraphRequest` drops custom ports from relative URIs. It skips itself when either is missing.
+
+## Amendment: an explicit list of refusal statuses (2026-11-23)
+
+### Context
+
+The original decision treated **any** 4xx response as proof that Graph refused the message. An external review of the project pointed out that this claims something about every 4xx status, including ones added later, and that some don't support it. 408 Request Timeout is the clearest case: a proxy or gateway in front of Graph can send it after the request was forwarded, so the message may have been accepted. Statuses like 409 or 423 have no defined meaning for `sendMail` at all.
+
+The [`sendMail` reference](https://learn.microsoft.com/en-us/graph/api/user-sendmail) documents only `202 Accepted` and a `400` for invalid MIME content. The other statuses Keel sees in practice (authorization, a missing mailbox, an oversized or wrongly typed body, throttling, an unavailable service) come from Graph's general error behavior and HTTP's definitions, not from anything `sendMail`-specific.
+
+The original text also called a 503 proof that Graph "did not process the request". HTTP defines 429 and 503 as statuses the server sends without acting on the request, and Graph follows that, but a client can't verify it. That's a convention, not proof.
+
+### Decision
+
+- `Test-GraphSendRefused` treats a status as a refusal only if it is on an explicit list: **400, 401, 403, 404, 413, 415, 429, and 503**. Every other status, including 408, is classified as possibly delivered and raises `GraphDeliveryUnknown`.
+  - 400, 401, 403, 404, 413, and 415 reject the request before a message exists: it's malformed, unauthorized, aimed at a mailbox that doesn't exist, too large, or the wrong content type.
+  - 429 and 503 are refusals by HTTP convention, as above. They stay on the list, because throttling and outages are the main reason SMTP fallback exists.
+- Adding a status to the list needs a reason it can't follow acceptance for `sendMail`, and a Pester test.
+- The retry list (429 and 503) is unchanged.
+
+### Consequences
+
+- A `sendMail` failure with 405, 408, 409, 410, 411, 412, 422, 423, or any other unlisted 4xx no longer falls back to SMTP and is no longer reported as refused. It fails with `GraphDeliveryUnknown`, so the operator checks message trace before resending. This is a behavior change for callers using `-AllowSmtpFallback`: for those statuses a message that used to arrive through SMTP now fails instead. None of these statuses are documented for `sendMail`, so we expect this to be rare, and it errs toward the visible failure this ADR already prefers to a duplicate.
+- A new status Graph starts returning defaults to Unknown until someone looks at it, instead of to "refused".
+- The docs now describe 429 and 503 as refusal signals Graph follows by convention, not proof.

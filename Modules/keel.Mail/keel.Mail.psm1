@@ -22,10 +22,19 @@ in the manifest.
 $script:GraphInlineAttachmentLimitBytes = 3MB
 
 # sendMail is not idempotent: repeating a request Graph already accepted sends the
-# message again. Only retry statuses where Graph refused the request outright.
+# message again. Only retry the throttling and unavailable statuses, which by HTTP
+# convention mean the request was not processed.
 # A 500, 502, or 504 can arrive after the message was accepted, so those are
 # never retried and never trigger SMTP fallback.
 $script:GraphSendRetryableStatusCodes = @(429, 503)
+
+# Statuses Test-GraphSendRefused treats as "Graph did not accept the message", so
+# resending through Graph or SMTP is allowed. This is an explicit list, not a 4xx
+# range, so a status nobody has reasoned about defaults to Unknown (no resend).
+# 400, 401, 403, 404, 413, and 415 reject the request before a message exists.
+# 429 and 503 are refusal signals by HTTP convention, not proof. 408 is left out:
+# a proxy or gateway can send it after the request was forwarded. See ADR 0002.
+$script:GraphSendRefusedStatusCodes = @(400, 401, 403, 404, 413, 415, 429, 503)
 
 # Failures raised before a connection exists, so the request never reached Graph.
 # HttpRequestError is PowerShell 7.4+ (.NET 8), WebExceptionStatus is Windows
@@ -385,20 +394,24 @@ function Test-GraphSendRefused {
     Reports whether a failed sendMail request was definitely not accepted by Graph.
 
     .DESCRIPTION
-    Returns $true only when the failure proves Graph did not accept the message,
-    so resending it, through Graph or SMTP, cannot create a duplicate:
+    Returns $true only when the failure shows Graph did not accept the message,
+    so resending it, through Graph or SMTP, should not create a duplicate:
 
-    - A 4xx status: Graph rejected the request.
-    - A 503 status: Graph was unavailable and did not process the request.
+    - A 400, 401, 403, 404, 413, or 415 status: Graph rejected the request
+      before a message existed.
+    - A 429 or 503 status: Graph throttled the request or was unavailable.
+      By HTTP convention these mean the request was not processed. That is
+      a convention Graph follows, not something a client can prove.
     - A connection failure with no response: name resolution, connection,
       TLS, or proxy tunnel errors raised before the request was sent.
-
     - A failure raised before the request was sent, marked with
       Exception.Data['KeelDeliveryState'] = 'NotSent'.
 
-    Returns $false for anything else, including 500, 502, and 504 responses,
-    timeouts, and connections dropped mid-request. In those cases Graph may
-    have accepted the message before the failure.
+    Returns $false for anything else, including any status not listed above
+    (such as 408, 409, or 500, 502, and 504), timeouts, and connections
+    dropped mid-request. In those cases Graph may have accepted the message
+    before the failure. A status is only added to the list once its meaning
+    for sendMail has been checked, so unfamiliar statuses fail safe.
 
     .PARAMETER ErrorRecord
     The error record from the failed sendMail request.
@@ -416,7 +429,7 @@ function Test-GraphSendRefused {
 
     $statusCode = Get-RetryableStatusCode -ErrorRecord $ErrorRecord
     if ($null -ne $statusCode) {
-        return (($statusCode -ge 400 -and $statusCode -le 499) -or $statusCode -eq 503)
+        return ($statusCode -in $script:GraphSendRefusedStatusCodes)
     }
 
     $exception = $ErrorRecord.Exception
@@ -569,10 +582,12 @@ function Send-GraphEmail {
     Delivers an email message using Microsoft Graph API, supporting both
     direct token-based authentication and SDK-based authentication.
 
-    The request is retried only on 429 and 503, where Graph refused it. If the
-    request fails in a way that leaves it unclear whether Graph accepted the
-    message (for example a 500, 502, or 504, or a timeout), the function throws
-    an error with the ErrorId 'GraphDeliveryUnknown' and sets
+    The request is retried only on 429 and 503, which by HTTP convention mean
+    Graph did not process it. If the request fails in a way that leaves it
+    unclear whether Graph accepted the message (for example a 500, 502, or 504,
+    a 408 or another status keel.Mail does not list as a refusal, or a
+    timeout), the function throws an error with the ErrorId
+    'GraphDeliveryUnknown' and sets
     Exception.Data['KeelDeliveryState'] to 'Unknown'. Callers must not resend
     the message after that error without checking whether it was delivered.
 
@@ -1168,11 +1183,12 @@ function Send-Email {
 
     .PARAMETER AllowSmtpFallback
     If specified, allows the function to fall back to SMTP when Graph delivery
-    fails and the failure proves Graph did not accept the message: a 4xx or 503
-    response, a connection failure before the request was sent, or a problem
-    found before sending, such as an oversized attachment. When Graph may have
-    accepted the message, such as after a 500, 502, or 504 or a timeout, no
-    fallback is attempted and the error is rethrown.
+    fails and the failure shows Graph did not accept the message: a 400, 401,
+    403, 404, 413, 415, 429, or 503 response, a connection failure before the
+    request was sent, or a problem found before sending, such as an oversized
+    attachment. When Graph may have accepted the message, such as after a 500,
+    502, or 504, a 408 or other unrecognized status, or a timeout, no fallback
+    is attempted and the error is rethrown.
 
     .PARAMETER Port
     The TCP port to use for SMTP delivery. Defaults to the Send-MailMessage
