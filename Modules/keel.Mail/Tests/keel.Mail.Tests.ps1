@@ -427,7 +427,7 @@ Describe 'keel.Mail' {
 
         It 'reports status <StatusCode> as refused, so resending cannot duplicate' -ForEach @(
             @{ StatusCode = 400 }, @{ StatusCode = 401 }, @{ StatusCode = 403 }, @{ StatusCode = 404 },
-            @{ StatusCode = 408 }, @{ StatusCode = 413 }, @{ StatusCode = 429 }, @{ StatusCode = 503 }
+            @{ StatusCode = 413 }, @{ StatusCode = 415 }, @{ StatusCode = 429 }, @{ StatusCode = 503 }
         ) {
             $record = New-FailureRecord ([System.Exception]::new("Response status code does not indicate success: $StatusCode (x)."))
             Test-Refused $record | Should-BeTrue
@@ -435,6 +435,16 @@ Describe 'keel.Mail' {
 
         It 'reports status <StatusCode> as possibly delivered' -ForEach @(
             @{ StatusCode = 500 }, @{ StatusCode = 502 }, @{ StatusCode = 504 }
+        ) {
+            $record = New-FailureRecord ([System.Exception]::new("Response status code does not indicate success: $StatusCode (x)."))
+            Test-Refused $record | Should-BeFalse
+        }
+
+        # 408 can come from a proxy or gateway after the request was forwarded, and
+        # other 4xx statuses haven't been checked against sendMail, so they fail safe.
+        It 'reports unlisted 4xx status <StatusCode> as possibly delivered' -ForEach @(
+            @{ StatusCode = 405 }, @{ StatusCode = 408 }, @{ StatusCode = 409 }, @{ StatusCode = 410 },
+            @{ StatusCode = 422 }, @{ StatusCode = 423 }, @{ StatusCode = 499 }
         ) {
             $record = New-FailureRecord ([System.Exception]::new("Response status code does not indicate success: $StatusCode (x)."))
             Test-Refused $record | Should-BeFalse
@@ -708,7 +718,7 @@ Describe 'keel.Mail' {
             }
 
             It 'sends exactly once and reports unknown delivery after a <StatusCode>' -ForEach @(
-                @{ StatusCode = 500 }, @{ StatusCode = 502 }, @{ StatusCode = 504 }
+                @{ StatusCode = 500 }, @{ StatusCode = 502 }, @{ StatusCode = 504 }, @{ StatusCode = 408 }, @{ StatusCode = 409 }
             ) {
                 $script:GraphAttempts = 0
                 Mock Invoke-RestMethod -ModuleName keel.Mail {
@@ -1650,6 +1660,19 @@ Describe 'keel.Mail' {
                 Mock Invoke-RestMethod -ModuleName keel.Mail {
                     $script:RestCalls.Add(@{ Uri = [string]$Uri; Body = $Body })
                     throw 'Response status code does not indicate success: 504 (Gateway Timeout).'
+                }
+
+                { Send-Email @BaseMail -GraphAccessToken 'tok' -SmtpServer 'smtp.contoso.com' -AllowSmtpFallback } |
+                    Should-Throw -ExceptionMessage '*may have been delivered*'
+
+                $script:RestCalls.Count | Should-Be 1
+                Should-NotInvoke Send-MailMessage -ModuleName keel.Mail
+            }
+
+            It 'sends a message once, and not through SMTP, when Graph returns a request timeout' {
+                Mock Invoke-RestMethod -ModuleName keel.Mail {
+                    $script:RestCalls.Add(@{ Uri = [string]$Uri; Body = $Body })
+                    throw 'Response status code does not indicate success: 408 (Request Timeout).'
                 }
 
                 { Send-Email @BaseMail -GraphAccessToken 'tok' -SmtpServer 'smtp.contoso.com' -AllowSmtpFallback } |

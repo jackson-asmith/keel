@@ -91,23 +91,23 @@ $mail = @{
 Send-Email @mail -AllowSmtpFallback
 ```
 
-If Graph refuses the message, a warning with the Graph error is written and the message is sent through SMTP instead.
+If Graph refuses the message (see the table below), a warning with the Graph error is written and the message is sent through SMTP instead.
 
 ### Delivery safety
 
-`sendMail` is not safe to repeat: if Graph has already accepted a message, sending it again delivers a duplicate. So `Send-Email` only retries or falls back to SMTP when the failure proves Graph did not accept the message:
+`sendMail` is not safe to repeat: if Graph has already accepted a message, sending it again delivers a duplicate. So `Send-Email` only retries or falls back to SMTP when the failure shows Graph did not accept the message. Statuses are matched against an explicit list; any status not on it is treated as possibly delivered:
 
 | Graph failure | Retried through Graph | SMTP fallback |
 |---|---|---|
 | 429 or 503 | Yes | Yes, if retries run out |
-| Other 4xx (400, 401, 403, 404, 413, ...) | No | Yes |
+| 400, 401, 403, 404, 413, or 415 | No | Yes |
 | Name resolution, connection, TLS, or proxy failure before the request was sent | No | Yes |
 | Problem found before sending, such as an attachment over 3 MB | No | Yes |
-| 500, 502, or 504, a timeout, or a connection dropped mid-request | No | **No** |
+| 500, 502, or 504, 408 or any other status not listed above, a timeout, or a connection dropped mid-request | No | **No** |
 
 This applies whether `Send-Email` calls Graph directly with an access token or through the Graph PowerShell SDK. The SDK normally retries 429, 503, and 504 on its own, so `keel.Mail` turns the SDK's retries off for each `sendMail` request and restores your settings afterward. The SDK's retry settings are shared by the whole process, including other runspaces such as `ForEach-Object -Parallel`, so sends in the same process take turns: each one waits for the previous send's request to finish before changing the settings. Other Graph calls running in parallel in the same process still skip SDK retries while a message is being sent.
 
-In the last row Graph may already have delivered the message, so `Send-Email` stops with a `GraphDeliveryUnknown` error, and `$_.Exception.Data['KeelDeliveryState']` is `Unknown`. Check the sender's message trace before resending. See [ADR 0002](docs/adr/0002-no-resend-after-ambiguous-graph-failure.md) for the reasoning.
+In the last row Graph may already have delivered the message, so `Send-Email` stops with a `GraphDeliveryUnknown` error, and `$_.Exception.Data['KeelDeliveryState']` is `Unknown`. Check the sender's message trace before resending. A 429 or 503 is treated as a refusal because HTTP defines them that way and Graph follows that convention, not because a client can prove the message wasn't accepted. See [ADR 0002](docs/adr/0002-no-resend-after-ambiguous-graph-failure.md) for the reasoning.
 
 ### Recipients
 
