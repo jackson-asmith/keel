@@ -2,7 +2,7 @@
 
 Notable changes to keel. Both modules share a version (see the README). Releases before this file existed are described in [GitHub Releases](https://github.com/jackson-asmith/keel/releases).
 
-## 1.2.0 (unreleased)
+## 1.2.0 (2026-11-23)
 
 ### Changed
 
